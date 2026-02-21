@@ -96,6 +96,8 @@ class AEConfig(BaseConfig):
     scale_factor: float = 0.41407
     vae_latent_dim: int = 32
     vae_downsample_rate: int = 32
+    img_type: str = "rgb"
+    input_shape: int = 3
     sample_posterior: bool = True
     extra: Any = None
 
@@ -193,6 +195,7 @@ class TrainingConfig(BaseConfig):
         ]
     )
     local_save_vis: bool = False
+    vis_rgb_channels: Any = "mean"
     deterministic_validation: bool = True
     online_metric: bool = False
     eval_metric_step: int = 5000

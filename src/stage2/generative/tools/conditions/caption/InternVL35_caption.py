@@ -34,7 +34,7 @@ from src.utilities.logging import log
 from src.utilities.train_utils.visualization import get_rgb_image
 
 remote_path = "OpenGVLab/InternVL3_5-8B"
-local_path = "src/stage2/generative/tools/conditions/caption/weights/models--OpenGVLab--InternVL3_5-8B/snapshots/9bb6a56ad9cc69db95e2d4eeb15a52bbcac4ef79"
+local_path = "/Data/ZiHanCao/checkpoints/models--OpenGVLab--InternVL3_5-8B/snapshots/9bb6a56ad9cc69db95e2d4eeb15a52bbcac4ef79"
 max_tokens = 300
 default_prompt = f"""
 You will act as a remote sensing analyst to describe the content of the image.

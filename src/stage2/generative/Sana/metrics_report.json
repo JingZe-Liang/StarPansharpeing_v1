@@ -1,0 +1,24 @@
+{
+  "metadata_jsonl": "src/stage2/generative/Sana/outputs_sam270k_infer/metadata.jsonl",
+  "real_litdata_dir": "data2/RemoteSAM270k/LitData_hyper_images2",
+  "sampler": "all",
+  "cfg_ratio": "all",
+  "metrics": [
+    "fid",
+    "is",
+    "kid",
+    "psnr",
+    "ssim"
+  ],
+  "device": "cuda:0",
+  "results": {
+    "fid": 68.6416244506836,
+    "is_mean": 6.199168682098389,
+    "is_std": 0.6869083642959595,
+    "kid_mean": 0.006912255194038153,
+    "kid_std": 1.3276687127472542e-07,
+    "psnr": 16.235318819999694,
+    "ssim": 0.3397294432611088,
+    "num_samples": 1000
+  }
+}

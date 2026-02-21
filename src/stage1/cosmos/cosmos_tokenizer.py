@@ -673,7 +673,7 @@ class ContinuousImageTokenizer(nn.Module):
             return self.decoder.decoder.conv_out.wrap_mod.weight
 
     def get_last_enc_layer(self):
-        # get encoder last layer weight for visual foundation loss
+        # get encoder last layer weight for visual foundation loss (VA-VAE)
         # return self.encoder.encoder.conv_out.weight
         if self._vf_on_z_or_module == "z":
             return self.encoder.quant_conv.weight
@@ -699,19 +699,45 @@ class ContinuousImageTokenizer(nn.Module):
             return h
 
         bs = h.size(0)
-        noise_type_cfg = getattr(self.cfg, "latent_noise_type", "uniform_max_0.3")
-        # sample interpolation factor t
-        t = _sample_t_distributional(bs=bs, device=h.device, noise_type_cfg=noise_type_cfg)
-        t = t.to(h.dtype).view(-1, 1, 1, 1)
+        noise_type_cfg = getattr(self.cfg, "latent_noise_type", "uniform_max_0.2")
 
-        # sample noise
-        noise = torch.randn_like(h)
+        # ------- Diffusion/flow-matching (VP)-like noise ------- #
+        if noise_type_cfg.startswith(("beta", "exp", "uniform")):
+            logger.trace(f"will augment latent with noise with {noise_type_cfg=}")
+            # sample interpolation factor t
+            t = _sample_t_distributional(bs=bs, device=h.device, noise_type_cfg=noise_type_cfg)
+            t = t.to(h.dtype).view(-1, 1, 1, 1)
 
-        # mask out the dropped channels
-        if mask is not None:
-            assert mask.shape[1] == h.shape[1], "mask and h should have the same channel number"
-            noise = torch.where(mask, noise, torch.zeros_like(noise))
-        h_noise = t * noise + (1 - t) * h
+            # sample noise
+            noise = torch.randn_like(h)
+
+            # mask out the dropped channels
+            if mask is not None:
+                assert mask.shape[1] == h.shape[1], "mask and h should have the same channel number"
+                noise = torch.where(mask, noise, torch.zeros_like(noise))
+
+            # see Sphere Encoder paper, using v=f(E(x))
+            # to match the SNR of the latent; v=tan(a) * e + v
+            # set a = 85 deg for 512 px, sigma = tan(a) = 11.43
+            # at this time, set t = 0.08045 for perfect matching.
+            h_noise = t * noise + (1 - t) * h
+
+        # --------- Variance exploding-like noise -------- #
+        elif noise_type_cfg.startswith("ve"):
+            sigma = float(noise_type_cfg.split("_")[1])  # e.g., 've_10'
+            lamb = torch.rand(bs, device=h.device, dtype=h.dtype)
+            noise_amp = lamb.view(-1, 1, 1, 1) * sigma
+            noise = torch.randn_like(h)
+            eps = 1e-8
+            if mask is not None:
+                # mask: (bs, C, H, W) bool
+                m = mask.to(dtype=h.dtype)
+                denom = m.mean(dim=(1, 2, 3), keepdim=True).clamp_min(eps)
+                h2_mean_masked = ((h * h) * m).mean(dim=(1, 2, 3), keepdim=True) / denom
+                h_amp = torch.sqrt(h2_mean_masked + eps).detach()
+            else:
+                h_amp = torch.sqrt(torch.mean(h * h, dim=(1, 2, 3), keepdim=True) + eps).detach()
+            h_noise = h + noise_amp * h_amp * noise
 
         return h_noise
 
@@ -932,7 +958,7 @@ class ContinuousImageTokenizer(nn.Module):
         inp_shape: torch.Size or int of channels.
         clamp: Clamp decoded values to (-1, 1).
         """
-        dec_out = edict(**inp) if isinstance(inp, dict) else edict(latent=inp)
+        dec_out = edict(**inp) if isinstance(inp, dict) else edict(latent=inp)  # type: ignore
         # h = self._maybe_channels_last_4d(dec_out["latent"])
         h = dec_out["latent"]
         dec_out["latent"] = h
@@ -1004,7 +1030,11 @@ class ContinuousImageTokenizer(nn.Module):
         else:
             if uni_tokenizer_path != "" or uni_tokenizer_path is not None:
                 logger.info(f"Loading pretrained encoder from {uni_tokenizer_path} for pretrained model")
-                weights = accelerate.utils.load_state_dict(uni_tokenizer_path)
+                weights = (
+                    torch.load(uni_tokenizer_path, weights_only=False)
+                    if uni_tokenizer_path.endswith((".pt", ".pth"))
+                    else accelerate.utils.load_state_dict(uni_tokenizer_path)
+                )
                 # load_state_dict will check the shape of the model and the state dict
                 _missing_keys, _unexp_keys = load_weights_with_shape_check(self, weights)
                 logger.warning(
@@ -1043,7 +1073,7 @@ class ContinuousImageTokenizer(nn.Module):
                     self.decoder.decoder.conv_out.bias.data.copy_(weights.get(_tgt_conv_b, None))
                     logger.info(f"[Cosmos Tokenizer]: conv_out is copied from pretrained model from key {_tgt_conv_w}")
 
-                logger.info("load pretrained model done.")
+                logger.success("load pretrained model done.")
 
             else:
                 assert enc_path.endswith("safetensors") and dec_path.endswith("safetensors"), (
@@ -1361,7 +1391,7 @@ def vae_f16_config(
 @catch_any()
 def test_tokenizer_forward_backward(
     model_cls=ContinuousImageTokenizer,
-    is_lora=False,
+    load_lora_type: str = "peft",
     count_params=False,
     real_data: str | None = None,
     use_optim=False,
@@ -1421,30 +1451,38 @@ def test_tokenizer_forward_backward(
         tokenizer = model_cls.create_model(**config)
         tokenizer = tokenizer.to(device, dtype)
 
+    is_lora = lora_ckpt is not None
     if is_lora:
         assert lora_ckpt is not None, "lora_ckpt is required for lora test"
         # Use TokenizerLoRAMixin for lazy LoRA loading
-        if isinstance(lora_ckpt, str):
-            lora_ckpt = [lora_ckpt]
+        if load_lora_type == "peft":
+            from peft import PeftModel
 
-        # Create lora_weights dict for TokenizerLoRAMixin
-        lora_weights = {}
-        for ckpt_path in lora_ckpt:
-            # Use directory stem as adapter name
-            lora_name = Path(ckpt_path).stem
-            lora_weights[lora_name] = ckpt_path
+            assert isinstance(lora_ckpt, str)
+            peft_model = PeftModel.from_pretrained(tokenizer, lora_ckpt)
+            tokenizer = peft_model
+        else:
+            if isinstance(lora_ckpt, str):
+                lora_ckpt = [lora_ckpt]
 
-        # Create TokenizerLoRAMixin instance
-        tokenizer_mixin = TokenizerLoRAMixin(
-            tokenizer=tokenizer,
-            lora_weights=lora_weights,
-            lora_hyper_chans=lora_changes_chans,
-            active_lora=active_lora_name,
-            lora_cfg=None,  # Use configs from directories
-        )
-        # get base model
-        # tokenizer = tokenizer_mixin.base_tokenizer
-        tokenizer = tokenizer_mixin
+            # Create lora_weights dict for TokenizerLoRAMixin
+            lora_weights = {}
+            for ckpt_path in lora_ckpt:
+                # Use directory stem as adapter name
+                lora_name = Path(ckpt_path).stem
+                lora_weights[lora_name] = ckpt_path
+
+            # Create TokenizerLoRAMixin instance
+            tokenizer_mixin = TokenizerLoRAMixin(
+                tokenizer=tokenizer,
+                lora_weights=lora_weights,
+                lora_hyper_chans=lora_changes_chans,
+                active_lora=active_lora_name,
+                lora_cfg=None,  # Use configs from directories
+            )
+            # get base model
+            # tokenizer = tokenizer_mixin.base_tokenizer
+            tokenizer = tokenizer_mixin
 
         # Move to device and set to eval mode
         tokenizer = tokenizer.to("cuda", dtype)
@@ -1452,7 +1490,8 @@ def test_tokenizer_forward_backward(
         # tokenizer = _maybe_channels_last_module(tokenizer)
 
         # Log available LoRAs
-        logger.info(f"Available LoRA adapters: {tokenizer_mixin.get_available_loras()}")
+        logger.success(f"Load Lora adapter done.")
+        # logger.info(f"Available LoRA adapters: {tokenizer_mixin.get_available_loras()}")
 
     if count_params:
         logger.info(parameter_count_table(tokenizer))
@@ -1588,7 +1627,9 @@ def test_tokenizer_forward_backward(
                 psnr = PeakSignalNoiseRatio(data_range=1.0).to(device)
                 psnr_val = psnr((x + 1) / 2, (y + 1) / 2)
                 # logger.info(f"PSNR: {psnr_val}")
-                tbar.set_description(f"PSNR: {psnr_val:.4f} - shape: {x.shape}")
+                tbar.set_description(
+                    f"PSNR: {psnr_val:.4f} - shape: {x.shape} | latent min/max: {h.min().item()}/{h.max().item()}"
+                )
                 metric.update(psnr_val)
 
             if use_optim:
@@ -1644,15 +1685,15 @@ if __name__ == "__main__":
     # Test lora
     test_tokenizer_forward_backward(
         base_model_ckpt="runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors",
-        save_pca_vis=True,
+        lora_ckpt="runs/stage1_cosmos_nested_lora/2026-02-20_19-00-12_cosmos_lora=lora_r=32_f8c16p1_hsigene/peft_ckpt/hsigene",
+        save_pca_vis=False,
         pca_type="z",
-        real_data="fmow_MS",
-        is_lora=False,
-        save_img_dir=None,  # "tmp/vis_pansharpening_loras",
-        rgb_chans=[0, 1, 2],  # [49, 39, 29],  # RGB
+        real_data="HSIGene",
+        # save_img_dir='tmp/hsi_gene_recon',  # "tmp/vis_pansharpening_loras",
+        rgb_chans=[20, 12, 4],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
-        max_iters=200,
+        max_iters=100,
         compute_mean_std=True,
         use_optim=False,
         check_grad=False,

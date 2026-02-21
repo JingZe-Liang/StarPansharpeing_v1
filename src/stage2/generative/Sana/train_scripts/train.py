@@ -76,6 +76,26 @@ from src.utilities.logging import configure_logger, set_logger_file
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
+def _build_vae_from_config(
+    config: SanaConfig,
+    device: torch.device | str,
+    *,
+    dtype: torch.dtype | None = None,
+) -> torch.nn.Module:
+    # breakpoint()
+    vae_extra = config.vae.extra if isinstance(config.vae.extra, dict) else {}
+    vae_kwargs = {k: v for k, v in vae_extra.items() if v is not None}
+    vae = get_vae(
+        config.vae.vae_type,
+        config.vae.vae_pretrained,
+        device,
+        **vae_kwargs,
+    )
+    if dtype is not None:
+        vae = vae.to(dtype)
+    return vae
+
+
 def set_fsdp_env():
     # Basic FSDP settings
     os.environ["ACCELERATE_USE_FSDP"] = "true"
@@ -271,9 +291,7 @@ def log_validation(
 
         if control_sig.shape[-2:] == (state.image_size, state.image_size):
             if vae_for_encode is None:
-                vae_for_encode = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(
-                    state.vae_dtype
-                )
+                vae_for_encode = _build_vae_from_config(config, accelerator.device, dtype=state.vae_dtype)
 
             control_signal_types = getattr(config.controlnet, "control_signal_types", None)
             n_types = len(control_signal_types) if isinstance(control_signal_types, list) else 0
@@ -374,9 +392,7 @@ def log_validation(
                     data_info["control_signal"] = control_sig.to(device=device, dtype=z.dtype)
                 else:
                     if vae is None:
-                        vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(
-                            state.vae_dtype
-                        )
+                        vae = _build_vae_from_config(config, accelerator.device, dtype=state.vae_dtype)
                     control_sig = _build_control_signal(len(latents), vae)
 
                 if "control_signal" not in data_info:
@@ -445,13 +461,19 @@ def log_validation(
                 raise ValueError(f"{sampler} not implemented")
 
             latents.append(denoised)
+
         torch.cuda.empty_cache()
         if vae is None:
-            vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(state.vae_dtype)
+            vae = _build_vae_from_config(config, accelerator.device, dtype=state.vae_dtype)
 
         for prompt, latent in zip(state.validation_prompts, latents):
             latent = latent.to(state.vae_dtype)
-            samples = vae_decode(config.vae.vae_type, vae, latent)
+            samples = vae_decode(
+                config.vae.vae_type,
+                vae,
+                latent,
+                input_shape=getattr(config.vae, "input_shape", 3),
+            )
             img_type = getattr(config.vae, "img_type", "rgb")
             if img_type == "rgb":
                 samples = (
@@ -467,7 +489,8 @@ def log_validation(
                 from src.utilities.train_utils import get_rgb_image
 
                 samples = (samples + 1) / 2
-                samples = get_rgb_image(samples, "mean", use_linstretch=True)
+                vis_rgb_channels = getattr(config.train, "vis_rgb_channels", "mean")
+                samples = get_rgb_image(samples, vis_rgb_channels, use_linstretch=True)
                 samples = torch.clamp(samples, 0, 1)
                 samples = (255.0 * samples).to("cpu", dtype=torch.uint8).numpy()[0]
                 image = Image.fromarray(samples)
@@ -580,13 +603,21 @@ def log_validation(
 
         ##### To image #####
         torch.cuda.empty_cache()
+        # breakpoint()
         if state.vae is None:
-            state.vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(state.vae_dtype)
+            state.vae = _build_vae_from_config(config, accelerator.device, dtype=state.vae_dtype)
+        inp_shape = getattr(config.vae, "input_shape", 3)
+        img_type = getattr(config.vae, "img_type", "rgb")
+        logger.info(f"Use {inp_shape=}, {img_type=}")
 
         for prompt, latent in zip(validation_prompts_logs, latents):
             latent = latent.to(state.vae_dtype)
-            samples = vae_decode(config.vae.vae_type, state.vae, latent)
-            img_type = getattr(config.vae, "img_type", "rgb")
+            samples = vae_decode(
+                config.vae.vae_type,
+                state.vae,
+                latent,
+                input_shape=inp_shape,
+            )
             if img_type == "rgb":
                 samples = (
                     torch.clamp(127.5 * samples + 128.0, 0, 255)
@@ -601,9 +632,10 @@ def log_validation(
                 from src.utilities.train_utils import get_rgb_image
 
                 samples = (samples + 1) / 2
-                samples = get_rgb_image(samples, "mean", use_linstretch=True)
+                vis_rgb_channels = getattr(config.train, "vis_rgb_channels", "mean")
+                samples = get_rgb_image(samples, vis_rgb_channels, use_linstretch=True)
                 samples = torch.clamp(samples, 0, 1)
-                samples = (255.0 * samples).to("cpu", dtype=torch.uint8).numpy()[0]
+                samples = (255.0 * samples).to("cpu", dtype=torch.uint8).numpy()[0].transpose(1, 2, 0)
                 image = Image.fromarray(samples)
 
             current_image_logs.append({"validation_prompt": prompt + label_suffix, "images": [image]})
@@ -1274,7 +1306,7 @@ def main(cfg: SanaConfig) -> None:
         else None
     )
     if not config.data.load_vae_feat:
-        vae = get_vae(config.vae.vae_type, config.vae.vae_pretrained, accelerator.device).to(vae_dtype)
+        vae = _build_vae_from_config(config, accelerator.device, dtype=vae_dtype)
     tokenizer = text_encoder = None
     if not config.data.load_text_feat:
         text_encoder_extra = config.text_encoder.extra if isinstance(config.text_encoder.extra, dict) else {}
@@ -1638,7 +1670,7 @@ def main(cfg: SanaConfig) -> None:
 
     optimizer = ForeachAdamW(
         model.parameters(),
-        lr=2.0e-4,
+        lr=1.5e-4,
         betas=(0.9, 0.95),
         eps=1e-9,
         weight_decay=0.02,

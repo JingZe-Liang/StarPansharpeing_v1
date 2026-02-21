@@ -80,7 +80,7 @@
 
 [submodule "src/stage2/detections/GT-HAD"]
 	path = src/stage2/detections/GT-HAD
-	url = https://github.com/jeline0110/GT-HAD.git
+	url = https://github.com/jeline0110/third_party/GT-HAD.git
 
 [submodule "src/stage2/unmixing/traditional/HySUPP"]
     path = src/stage2/unmixing/traditional/HySUPP
@@ -95,7 +95,7 @@
     url = https://github.com/WZDTHU/TiM.git
 
 [submodule "src/stage2/detections/AETNet"]
-    path = src/stage2/detections/AETNet
+    path = src/stage2/detections/third_party/AETNet
     url = https://github.com/ZhaoxuLi123/AETNet.git
 
 [submodule "src/stage1/one_d_tokenizer/semanticist/semanticist"]
@@ -233,3 +233,9 @@
 [submodule "src/stage2/segmentation/third_party/RSE_cross_city"]
 	path = src/stage2/segmentation/third_party/RSE_cross_city
 	url = https://github.com/danfenghong/RSE_Cross-city.git
+[submodule "src/stage2/generative/VideoX_Fun"]
+	path = src/stage2/generative/VideoX_Fun
+	url = https://github.com/aigc-apps/VideoX-Fun.git
+[submodule "src/stage2/generative/GLIGEN"]
+	path = src/stage2/generative/GLIGEN
+	url = https://github.com/gligen/GLIGEN.git

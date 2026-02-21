@@ -74,7 +74,7 @@ processor:
   save_original_rgb: false # 保存原始RGB图像用于对比
   condition_save_format: "jpg" # 条件图像保存为PNG格式
   caption_save_format: "json" # 描述保存为文本文件
-  resume_from: '/home/user/zihancao/Project/hyperspectral-1d-tokenizer/data/RemoteSAM270k/RemoteSAM-270K/tmp_conditions/JPEGImages' #JPEGImages/FAST_train_6862_0001 #JPEGImages/loveDAPoca_2348_1_0
+  resume_from: #'/home/user/zihancao/Project/hyperspectral-1d-tokenizer/data/RemoteSAM270k/RemoteSAM-270K/tmp_conditions/JPEGImages' #JPEGImages/FAST_train_6862_0001 #JPEGImages/loveDAPoca_2348_1_0
   relative_data_dir: conditions_4
   count_tar_num: false
   save_attn_mask: false

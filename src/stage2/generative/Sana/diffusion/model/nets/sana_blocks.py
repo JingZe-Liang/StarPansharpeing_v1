@@ -77,6 +77,26 @@ class MultiHeadCrossAttention(nn.Module):
             self.q_norm = nn.Identity()
             self.k_norm = nn.Identity()
 
+    @staticmethod
+    def _mask_to_kv_seqlens(mask: torch.Tensor, batch_size: int) -> list[int]:
+        if mask.ndim == 4:
+            # [B, 1, 1, L] -> [B, L]
+            mask_2d = mask[:, 0, 0, :]
+        elif mask.ndim == 2:
+            mask_2d = mask
+        else:
+            raise ValueError(f"Unsupported mask ndim={mask.ndim}, expected 2 or 4.")
+
+        if mask_2d.shape[0] != batch_size:
+            raise ValueError(f"Mask batch mismatch: mask batch={mask_2d.shape[0]}, expected {batch_size}.")
+
+        if mask_2d.dtype == torch.bool:
+            lengths = mask_2d.to(torch.int32).sum(dim=1)
+        else:
+            lengths = (mask_2d > 0).to(torch.int32).sum(dim=1)
+
+        return [max(1, int(v.item())) for v in lengths]
+
     def forward(self, x, cond, mask=None, **kwargs):
         # query: img tokens; key/value: condition; mask: if padding tokens
         B, N, C = x.shape
@@ -92,7 +112,11 @@ class MultiHeadCrossAttention(nn.Module):
         if _xformers_available:
             attn_bias = None
             if mask is not None:
-                attn_bias = xformers.ops.fmha.BlockDiagonalMask.from_seqlens([N] * B, mask)
+                if torch.is_tensor(mask):
+                    kv_seqlens = self._mask_to_kv_seqlens(mask, B)
+                else:
+                    kv_seqlens = [int(v) for v in mask]
+                attn_bias = xformers.ops.fmha.BlockDiagonalMask.from_seqlens([N] * B, kv_seqlens, device=q.device)
             x = xformers.ops.memory_efficient_attention(q, k, v, p=self.attn_drop.p, attn_bias=attn_bias)
         else:
             q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)  # [bs, num_heads, seq_len, head_dim]

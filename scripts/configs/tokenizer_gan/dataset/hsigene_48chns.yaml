@@ -1,0 +1,37 @@
+used: hsigene
+
+dataset_channel: 48
+img_size: 512
+rgb_channels: [20,12,4]
+
+train_loader:
+  _target_: src.data.litdata_hyperloader.ImageStreamingDataset.create_dataloader
+  input_dir: data2/HSIGene_dataset/LitData_hyper_images
+  stream_ds_kwargs:
+    to_neg_1_1: true
+    index_file_name: litdata_all_imgs
+    resize_before_transform: 512
+  loader_kwargs:
+    num_workers: 4
+    pin_memory: true
+    drop_last: true
+    persistent_workers: true
+    batch_size: 8
+    prefetch_factor: null
+    shuffle: false
+
+val_loader:
+  _target_: src.data.litdata_hyperloader.ImageStreamingDataset.create_dataloader
+  input_dir: data2/HSIGene_dataset/LitData_hyper_images
+  stream_ds_kwargs:
+    to_neg_1_1: true
+    index_file_name: litdata_all_imgs
+    resize_before_transform: 512
+  loader_kwargs:
+    num_workers: 4
+    pin_memory: true
+    drop_last: true
+    persistent_workers: true
+    batch_size: 8
+    prefetch_factor: null
+    shuffle: false

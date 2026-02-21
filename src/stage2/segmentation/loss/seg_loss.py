@@ -123,6 +123,13 @@ class HyperSegmentationLoss(torch.nn.Module):
             pred = get_at("[b h w] c, n [3] -> n 3", pred.permute(0, -2, -1, 1), mask_nonzero)  # 1d image
             gt = get_at("[b h w], n [3] -> n 3", gt, mask_nonzero)  # 1d gt map
 
+        # Keep tensors contiguous because some downstream losses (e.g., SMP DiceLoss)
+        # use `view`, which requires contiguous memory.
+        pred = pred.contiguous()
+        gt = gt.contiguous()
+        if mask is not None:
+            mask = mask.contiguous()
+
         # Only calculate losses with non-zero weights
         losses = []
         loss_dict = {}

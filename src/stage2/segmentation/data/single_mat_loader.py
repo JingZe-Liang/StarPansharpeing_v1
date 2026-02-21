@@ -1,7 +1,9 @@
+from io import StringIO
 from pathlib import Path
-from typing import Callable, Dict, List, Literal, Tuple, cast
+from typing import Callable, Literal, cast
 
 import numpy as np
+import rasterio
 import torch as th
 from easydict import EasyDict as edict
 from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip, RandomRotation, RandomVerticalFlip, Resize
@@ -21,7 +23,7 @@ def label_background_convert(label: Tensor | np.ndarray, convert_bg: bool = True
     if convert_bg:
         # Convert background (0) to 255, but preserve existing 255 (padding)
         # This ensures padding values remain 255 and don't become 254
-        fixed_padded_label = where_fn(label == 255, 255, label - 1)  # type: ignore[no-matching-overload]
+        fixed_padded_label = where_fn(label == 255, 255, label - 1)
         result = where_fn(label == 0, 255, fixed_padded_label)  # type: ignore[no-matching-overload]
     else:
         result = label
@@ -30,7 +32,7 @@ def label_background_convert(label: Tensor | np.ndarray, convert_bg: bool = True
 
 def label_background_recover(label: Tensor | np.ndarray, convert_bg: bool = True):
     where_fn = th.where if th.is_tensor(label) else np.where
-    result = where_fn(label == 255, 0, label + 1) if convert_bg else label  # type: ignore[no-matching-overload]
+    result = where_fn(label == 255, 0, label + 1) if convert_bg else label
     return result
 
 
@@ -47,6 +49,120 @@ def get_default_transform(p=0.5):
     return transform
 
 
+_HOUSTON13_RAW_REQUIRED_FILES = (
+    "2013_IEEE_GRSS_DF_Contest_CASI.tif",
+    "2013_IEEE_GRSS_DF_Contest_Samples_TR.txt",
+    "2013_IEEE_GRSS_DF_Contest_Samples_VA.txt",
+)
+
+
+def _resolve_houston13_raw_dir(data_root: Path, raw_dir: str | None = None) -> Path:
+    candidates: list[Path] = []
+    if raw_dir is not None:
+        candidates.append(data_root / raw_dir)
+    candidates.extend([data_root / "Houston2013" / "2013_DFTC", data_root / "2013_DFTC", data_root])
+    for candidate in candidates:
+        if all((candidate / filename).exists() for filename in _HOUSTON13_RAW_REQUIRED_FILES):
+            return candidate
+    raise FileNotFoundError(
+        "Cannot find Houston13 raw files. "
+        f"Expected files {_HOUSTON13_RAW_REQUIRED_FILES} under one of: {[c.as_posix() for c in candidates]}"
+    )
+
+
+def _apply_houston_roi_block(label: np.ndarray, roi_block: str, class_id: int) -> int:
+    if roi_block.strip() == "":
+        return class_id
+    try:
+        data = np.loadtxt(StringIO(roi_block), usecols=(2, 1), comments=";", dtype=np.int64)
+    except ValueError:
+        return class_id
+    if data.size == 0:
+        return class_id
+    if data.ndim == 1:
+        data = data[None, :]
+
+    rows = data[:, 0]
+    cols = data[:, 1]
+    valid = (rows >= 0) & (rows < label.shape[0]) & (cols >= 0) & (cols < label.shape[1])
+    rows = rows[valid]
+    cols = cols[valid]
+    if rows.size == 0:
+        return class_id
+
+    current = label[rows, cols]
+    conflict_mask = (current != 0) & (current != class_id)
+    if np.any(conflict_mask):
+        label[rows[conflict_mask], cols[conflict_mask]] = 0
+
+    assign_mask = current == 0
+    label[rows[assign_mask], cols[assign_mask]] = class_id
+    return class_id + 1
+
+
+def _read_houston_roi_txt(path: Path, shape: tuple[int, int]) -> np.ndarray:
+    label = np.zeros(shape, dtype=np.int32)
+    block_lines: list[str] = []
+    class_id = 1
+
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if line.startswith(";") or line.isspace():
+                continue
+            if line.lstrip().startswith("1 "):
+                class_id = _apply_houston_roi_block(label, "".join(block_lines), class_id)
+                block_lines.clear()
+            else:
+                block_lines.append(line)
+
+    class_id = _apply_houston_roi_block(label, "".join(block_lines), class_id)
+    _ = class_id
+    return label
+
+
+def _ensure_numpy_array(value: object, value_name: str) -> np.ndarray:
+    if value is None:
+        raise ValueError(f"Failed to load {value_name}: got None")
+    if isinstance(value, dict):
+        if len(value) != 1:
+            raise ValueError(f"Failed to load {value_name}: dict has {len(value)} entries, expected exactly 1")
+        value = next(iter(value.values()))
+    if isinstance(value, list):
+        if len(value) != 1 or not isinstance(value[0], np.ndarray):
+            raise ValueError(f"Failed to load {value_name}: list shape is unsupported")
+        value = value[0]
+    if not isinstance(value, np.ndarray):
+        raise ValueError(f"Failed to load {value_name}: unsupported type {type(value)!r}")
+    return value
+
+
+def houston13_load_from_dir(
+    data_dir: str,
+    raw_dir: str | None = None,
+):
+    data_root = Path(data_dir)
+    dataset_dir = _resolve_houston13_raw_dir(data_root=data_root, raw_dir=raw_dir)
+    casi_path = dataset_dir / "2013_IEEE_GRSS_DF_Contest_CASI.tif"
+    train_label_path = dataset_dir / "2013_IEEE_GRSS_DF_Contest_Samples_TR.txt"
+    test_label_path = dataset_dir / "2013_IEEE_GRSS_DF_Contest_Samples_VA.txt"
+
+    with rasterio.open(casi_path) as f:
+        casi_chw = f.read()
+    img_hwc = np.transpose(casi_chw, (1, 2, 0))
+
+    shape_hw = (img_hwc.shape[0], img_hwc.shape[1])
+    train_label = _read_houston_roi_txt(train_label_path, shape=shape_hw)
+    test_label = _read_houston_roi_txt(test_label_path, shape=shape_hw)
+
+    all_label = np.zeros(shape_hw, dtype=np.int32)
+    train_mask = train_label != 0
+    test_mask = test_label != 0
+    all_label[train_mask] = train_label[train_mask]
+    all_label[test_mask] = test_label[test_mask]
+
+    return img_hwc, all_label
+
+
 class SingleMatDataset(Dataset):
     """
     Hyperspectral Collection Dataset,
@@ -57,6 +173,7 @@ class SingleMatDataset(Dataset):
     paths: edict = edict(
         {
             "Houston13": {"img": "mat/Houston13_hwc.mat", "gt": "cls_GT/Houston13_7gt.mat"},
+            "Houston13_Raw": {"raw_dir": "Houston2013/2013_DFTC"},
             "Houston18": {"img": "mat/Houston18_hwc.mat", "gt": "cls_GT/Houston18_7gt.mat"},
             "Indian_pines": {"img": "mat/Indian_pines_corrected.mat", "gt": "cls_GT/Indian_pines_gt.mat"},
             "Pavia": {"img": "mat/Pavia.mat", "gt": "cls_GT/Pavia_gt.mat"},
@@ -88,11 +205,13 @@ class SingleMatDataset(Dataset):
         )
         path = self.paths[dataset_name]
 
-        img_path = Path(data_dir, path.img)
-        gt_path = Path(data_dir, path.gt)
-
-        self.img: np.ndarray = read_image(img_path)
-        self.gt: np.ndarray = read_image(gt_path)
+        if dataset_name == "Houston13_Raw":
+            self.img, self.gt = houston13_load_from_dir(data_dir=data_dir, raw_dir=path.get("raw_dir"))
+        else:
+            img_path = Path(data_dir, path.img)
+            gt_path = Path(data_dir, path.gt)
+            self.img = _ensure_numpy_array(read_image(img_path), "img")
+            self.gt = _ensure_numpy_array(read_image(gt_path), "gt")
         if self.gt.ndim == 3 and self.gt.shape[-1] == 1:
             self.gt = self.gt[..., 0]
         assert self.gt.ndim == 2, f"GT must be 2D, got shape {self.gt.shape}"
@@ -166,7 +285,7 @@ class SingleMatDataset(Dataset):
                 self.patches_indices, self.label_indices = [], []
             else:
                 patches_indices, label_indices, self.unsampled_area, patches_coords = sample_img_with_gt_indices(
-                    self.img, self.gt, cast(Dict[int, np.ndarray], self.sample_indices_train), patch_size=patch_size
+                    self.img, self.gt, cast(dict[int, np.ndarray], self.sample_indices_train), patch_size=patch_size
                 )
                 # Flatten as before
                 self.patches_indices, self.label_indices = [], []

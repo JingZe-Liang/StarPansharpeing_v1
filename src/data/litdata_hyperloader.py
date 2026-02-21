@@ -368,10 +368,11 @@ class _BaseStreamingDataset(StreamingDataset):
         self.index_file_name = index_file_name
 
         # change back
-        # hacky: call __len__ to cache first and then reset the original index file name
+        # Preload via base StreamingDataset getter to avoid calling subclass __getitem__
+        # before subclass attributes are initialized.
         if self.__len__() > 0:
             try:
-                _ = self[0]
+                _ = super().__getitem__(0)
             except Exception as e:
                 logger.warning(f"Failed to pre-load the first item for {input_dir}: {e}")
 
@@ -494,6 +495,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
         ),
         index_file_name: str | None = None,
         check_chans: bool = False,
+        disable_norm: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -509,6 +511,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
         self.force_to_rgb = force_to_rgb
         self._img_key = "img"
         self._check_chans = check_chans
+        self.disable_norm = disable_norm
 
         # Resize and crop
         self.resize_before_transform = resize_before_transform
@@ -579,7 +582,8 @@ class ImageStreamingDataset(_BaseStreamingDataset):
 
     def _norm_img(self, sample):
         """Normalize the image in the sample."""
-        sample = norm_img(sample, permute=False, to_neg_1_1=self.to_neg_1_1, **self.norm_options)
+        if not self.disable_norm:
+            sample = norm_img(sample, permute=False, to_neg_1_1=self.to_neg_1_1, **self.norm_options)
         return sample
 
     def _filter_only_img(self, sample):
@@ -604,7 +608,7 @@ class ImageStreamingDataset(_BaseStreamingDataset):
     def __check_chans_for_hyper_images(self, d, orig_img_shape: torch.Size, idx: int):
         """Check the number of channels for hyper images"""
         # fmt: off
-        assert d["img"].shape[0] in [ 3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369], (
+        assert d["img"].shape[0] in [3, 4, 8, 10, 12, 13, 32, 50, 150, 175, 202, 224, 242, 368, 369], (
             f"{d['img'].shape=}, {orig_img_shape=}, {d['__key__']=}, {idx=}"
         )
         # fmt: on
@@ -630,28 +634,40 @@ class ImageStreamingDataset(_BaseStreamingDataset):
         return sample
 
     def __getitem__(self, idx):
-        d = super().__getitem__(idx)
-        if d is None:
-            logger.warning(f"Caught Exception in __getitem__. Returning None.")
+        try:
+            d = super().__getitem__(idx)
+        except Exception as e:
+            logger.warning(f"Failed to read sample idx={idx}: {e}. Skip this sample.")
             return None
 
-        d = self._ensure_dict_sample(d)
-        d = self._conditions_select_random_one(d)
-        d = self._skip_undecode(d)
+        if d is None:
+            logger.warning("Caught Exception in __getitem__. Returning None.")
+            return None
 
-        _orig_img_shape = d[self._img_key].shape
+        try:
+            d = self._ensure_dict_sample(d)
+            d = self._conditions_select_random_one(d)
+            d = self._skip_undecode(d)
+            if d is None:
+                return None
 
-        # Image transformation and augmentation
-        d = self._pil_to_tensor(d)
-        d = self._crop_resize(d)
-        d = self._norm_img(d)
-        d = self._augment(d)
-        d = self._degrade(d)
-        # if not 'per_stream' shuffle, make sure each stream has the same keys
-        d = self._filter_only_img(d)
+            _orig_img_shape = d[self._img_key].shape
 
-        if self._check_chans:
-            self.__check_chans_for_hyper_images(d, _orig_img_shape, idx)
+            # Image transformation and augmentation
+            d = self._pil_to_tensor(d)
+            d = self._crop_resize(d)
+            d = self._norm_img(d)
+            d = self._augment(d)
+            d = self._degrade(d)
+            # if not 'per_stream' shuffle, make sure each stream has the same keys
+            d = self._filter_only_img(d)
+
+            if self._check_chans:
+                self.__check_chans_for_hyper_images(d, _orig_img_shape, idx)
+        except Exception as e:
+            sample_key = d.get("__key__", "N/A") if isinstance(d, dict) else "N/A"
+            logger.warning(f"Failed to process sample idx={idx}, key={sample_key}: {e}. Skip this sample.")
+            return None
 
         return edict(d)
 
@@ -663,19 +679,27 @@ class ConditionsStreamingDataset(_BaseStreamingDataset):
         self.to_neg_1_1 = to_neg_1_1
 
     def __getitem__(self, idx):
-        d = super().__getitem__(idx)
+        try:
+            d = super().__getitem__(idx)
+        except Exception as e:
+            logger.warning(f"Failed to read condition sample idx={idx}: {e}. Skip this sample.")
+            return None
 
-        assert len(d) == len(self._condition_keys) + 1, f"Condition keys missing in the data: {d.keys()}"
+        try:
+            assert len(d) == len(self._condition_keys) + 1, f"Condition keys missing in the data: {d.keys()}"
 
-        for k in self._condition_keys:
-            if d[k] is None:
-                # Check if any can not be decoded, or return all the condition as None
-                return None
-            d[k] = to_tensor_img(d[k], is_permuted=True)
+            for k in self._condition_keys:
+                if d[k] is None:
+                    # Check if any can not be decoded, or return all the condition as None
+                    return None
+                d[k] = to_tensor_img(d[k], is_permuted=True)
 
-        d = norm_img(d, norm_keys=self._condition_keys, permute=False, to_neg_1_1=self.to_neg_1_1)
-
-        return edict(d)
+            d = norm_img(d, norm_keys=self._condition_keys, permute=False, to_neg_1_1=self.to_neg_1_1)
+            return edict(d)
+        except Exception as e:
+            sample_key = d.get("__key__", "N/A") if isinstance(d, dict) else "N/A"
+            logger.warning(f"Failed to process condition idx={idx}, key={sample_key}: {e}. Skip this sample.")
+            return None
 
 
 class CaptionStreamingDataset(_BaseStreamingDataset):
@@ -684,15 +708,24 @@ class CaptionStreamingDataset(_BaseStreamingDataset):
 
     def __getitem__(self, idx):
         # {'caption': dict, 'valid_legth': int}
-        d = super().__getitem__(idx)
+        try:
+            d = super().__getitem__(idx)
+        except Exception as e:
+            logger.warning(f"Failed to read caption sample idx={idx}: {e}. Skip this sample.")
+            return None
         if d is None:
             return None
 
-        if isinstance(d["caption"], dict):
-            caption = d["caption"]["caption"]
-            assert isinstance(caption, str), f"Caption must be a string, got {type(caption)}"
-            d["caption"] = caption
-        return edict(d)
+        try:
+            if isinstance(d["caption"], dict):
+                caption = d["caption"]["caption"]
+                assert isinstance(caption, str), f"Caption must be a string, got {type(caption)}"
+                d["caption"] = caption
+            return edict(d)
+        except Exception as e:
+            sample_key = d.get("__key__", "N/A") if isinstance(d, dict) else "N/A"
+            logger.warning(f"Failed to process caption idx={idx}, key={sample_key}: {e}. Skip this sample.")
+            return None
 
 
 class GenerativeStreamingDataset(ParallelStreamingDataset):
@@ -730,7 +763,7 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
         self.resize = resize
         self.crop_resize_fn = AugmentationSequential(
             # first resize to 1024 for better cropping
-            Resize(size=1024, p=1.0),
+            Resize(size=512, p=1.0),
             # then the img, conditions are crop at the same place
             RandomResizedCrop(
                 size=(self.resize, self.resize) if isinstance(self.resize, int) else self.resize,
@@ -781,14 +814,23 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
 
         return d
 
+    @staticmethod
+    def __normalize_pair_key(key: Any) -> str:
+        if isinstance(key, (list, tuple)):
+            if len(key) == 0:
+                return ""
+            return str(key[0])
+        return str(key)
+
     def __check_is_paired(self, *samples):
         check_by_key = "__key__"
         _prev_val = None
         for d in samples:
+            cur_val = self.__normalize_pair_key(d[check_by_key])
             if _prev_val is None:
-                _prev_val = d[check_by_key]
+                _prev_val = cur_val
             else:
-                if _prev_val != d[check_by_key]:
+                if _prev_val != cur_val:
                     return False
 
         return True
@@ -834,11 +876,15 @@ class GenerativeStreamingDataset(ParallelStreamingDataset):
 
         # Check is paired
         if not self.__check_is_paired(img_d, cond_d, caption_d):
-            raise ValueError(f"Not paired: {img_d['__key__']}, {cond_d['__key__']}, {caption_d['__key__']}")
+            logger.warning(
+                f"Not paired: {img_d['__key__']}, {cond_d['__key__']}, {caption_d['__key__']}. Skip this sample."
+            )
+            return None
 
         # img, cond_imgs, cond_texts
+        pair_key = self.__normalize_pair_key(img_d["__key__"])
         sample_d = {
-            "__key__": img_d["__key__"],
+            "__key__": pair_key,
             "img": img_d[self._img_key],
             **{k: cond_d[k] for k in self._condition_keys},
             "caption": caption_d[self._caption_key],
@@ -1343,6 +1389,7 @@ def get_fast_test_hyper_litdata_load(
         "fmow_RGB",
         "fmow_MS",
         "SAM270k",
+        "HSIGene",
     ] = "RS5M",
     batch_size: int = 8,
     stream_ds_kwargs: dict[str, Any] | None = None,
@@ -1410,6 +1457,10 @@ def get_fast_test_hyper_litdata_load(
         "fmow_RGB": {
             "paths": ["data/Fmow_rgb/LitData_hyper_images"],
             "overrides": {"resize_before_transform": 512, "is_hwc": True},
+        },
+        "HSIGene": {
+            "paths": ["data2/HSIGene_dataset/LitData_hyper_images/train"],
+            "overrides": {"resize_before_transform": 256, "is_hwc": True},
         },
     }
 

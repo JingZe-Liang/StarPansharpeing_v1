@@ -44,6 +44,8 @@ vae:
   vae_pretrained: "runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors"
   vae_latent_dim: 16
   vae_downsample_rate: 8
+  img_type: rgb
+  input_shape: 3
   # vae_type: flux
   # vae_pretrained: flux
   # vae_latent_dim: 16
@@ -84,12 +86,12 @@ scheduler:
 # training setting
 train:
   num_workers: 6
-  seed: 2025
-  train_batch_size: 1
+  seed: 2026
+  train_batch_size: 8
   num_epochs: 100
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   grad_checkpointing: true
-  gradient_clip: 0.1
+  gradient_clip: 1.0
   optimizer:
     betas:
       - 0.9

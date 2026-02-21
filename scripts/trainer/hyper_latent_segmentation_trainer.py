@@ -18,7 +18,6 @@ from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
 from accelerate.utils.deepspeed import DummyOptim, DummyScheduler
-from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 from safetensors.torch import load_file
 from torch import Tensor
@@ -31,7 +30,6 @@ from tqdm import tqdm, trange
 import wandb
 
 from src.data.window_slider import WindowSlider, model_predict_patcher
-from src.stage2.segmentation.data.data_split import SingleImageHyperspectralSegmentationDataset
 from src.stage2.segmentation.data.single_mat_loader import SingleMatDataset, label_background_recover
 from src.stage2.segmentation.loss.seg_loss import boost_strap_update_label
 from src.stage2.segmentation.metrics import HyperSegmentationScore
@@ -112,24 +110,8 @@ class HyperSegmentationTrainer:
         self.log_msg("Weights will be saved at: {}".format(self.proj_dir))
         self.log_msg("Training is configured and ready to start.")
 
-        # Initialize indexing mode
-        self._use_single_img_indexing = getattr(self.train_cfg, "use_single_img_indexing", False)
-        if self._use_single_img_indexing:
-            self.log_msg("Using HyperSIGMA-style indexing for loss computation")
-            # Initialize accumulation buffers for HyperSIGMA mode
-            self._accumulated_preds: list[torch.Tensor] = []
-            self._accumulated_gts: list[torch.Tensor] = []
-            self._accumulated_indices: list[int] = []
-            self._current_image_id: int = 0
-            self._patches_per_image: int | None = getattr(self.train_cfg, "patches_per_image", None)
-            self.macro_batch_size: int = getattr(self.train_cfg, "macro_batch_size", 32)
-            if self._patches_per_image is None:
-                self.log_msg(
-                    "Warning: patches_per_image not specified, will auto-detect",
-                    level="WARNING",
-                )
-        else:
-            self.log_msg("Using standard segmentation loss computation")
+        # Compatibility shell: single-image indexing is forced off in this trainer.
+        self._initialize_indexing_mode()
 
         # is zero 2 or 3, not EMA
         _dpsp_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
@@ -197,6 +179,20 @@ class HyperSegmentationTrainer:
 
         # clear GPU memory
         torch.cuda.empty_cache()
+
+    def _initialize_indexing_mode(self) -> None:
+        requested_indexing = bool(getattr(self.train_cfg, "use_single_img_indexing", False))
+        self._use_single_img_indexing = False
+        self._patches_per_image: int | None = None
+        self.macro_batch_size: int = int(getattr(self.train_cfg, "macro_batch_size", 32))
+        if requested_indexing:
+            self.log_msg(
+                "train.use_single_img_indexing=True is deprecated in HyperSegmentationTrainer; "
+                "fall back to standard segmentation mode.",
+                level="WARNING",
+            )
+        else:
+            self.log_msg("Using standard segmentation loss computation")
 
     def setup_segmentation_model(self):
         self.model = hydra.utils.instantiate(self.cfg.segment_model)
@@ -392,8 +388,8 @@ class HyperSegmentationTrainer:
                     params = params_getter(with_name=False)
                     return hydra.utils.instantiate(optimizer_cfg)(params)
 
-            _get_model_params = (
-                lambda with_name: self.model.named_parameters() if with_name else self.model.parameters()
+            _get_model_params = lambda with_name: (
+                self.model.named_parameters() if with_name else self.model.parameters()
             )
             model_opt = _optimizer_creater(self.train_cfg.segment_optim, _get_model_params)
         else:
@@ -439,56 +435,34 @@ class HyperSegmentationTrainer:
         return model
 
     def set_hypersigma_indexing_mode(self, enable: bool = True):
-        """Enable or disable HyperSIGMA-style indexing for loss computation.
-
-        Args:
-            enable: Whether to use HyperSIGMA-style indexing
-        """
-        self._use_single_img_indexing = enable
-        mode_str = "enabled" if enable else "disabled"
-        self.log_msg(f"HyperSIGMA indexing mode {mode_str}")
-
-        # Initialize or clear accumulation buffers
+        """Compatibility shell for legacy API. HyperSIGMA indexing is always disabled."""
+        self._use_single_img_indexing = False
         if enable:
-            self._accumulated_preds = []
-            self._accumulated_gts = []
-            self._accumulated_indices = []
-            self._current_image_id = 0
+            self.log_msg(
+                "HyperSIGMA indexing mode is no longer supported in HyperSegmentationTrainer; "
+                "keep standard segmentation mode.",
+                level="WARNING",
+            )
         else:
-            # Cclear buffers when disabling
-            if hasattr(self, "_accumulated_preds"):
-                self._accumulated_preds.clear()
-                self._accumulated_gts.clear()
-                self._accumulated_indices.clear()
+            self.log_msg("Standard segmentation mode is enabled.")
 
     def get_current_indexing_mode(self) -> str:
-        """Get current indexing mode.
-
-        Returns:
-            str: Either 'hypersigma' or 'standard'
-        """
-        return "hypersigma" if self._use_single_img_indexing else "standard"
+        """Get current indexing mode."""
+        return "standard"
 
     def set_hypersigma_config(self, patches_per_image: int | None = None):
-        """Set HyperSIGMA configuration parameters.
-
-        Args:
-            patches_per_image: Number of patches per complete image
-        """
         if patches_per_image is not None:
-            self._patches_per_image = patches_per_image
-            self.log_msg(f"HyperSIGMA patches per image set to {patches_per_image}")
+            self.log_msg(
+                "patches_per_image is ignored in HyperSegmentationTrainer; "
+                "standard segmentation mode does not use image-level accumulation.",
+                level="WARNING",
+            )
 
     def get_hypersigma_config(self) -> dict:
-        """Get current HyperSIGMA configuration.
-
-        Returns:
-            dict: Configuration parameters
-        """
         return {
-            "enabled": self._use_single_img_indexing,
-            "patches_per_image": getattr(self, "_patches_per_image", None),
-            "accumulated_patches": len(getattr(self, "_accumulated_preds", [])),
+            "enabled": False,
+            "patches_per_image": None,
+            "accumulated_patches": 0,
         }
 
     def prepare_for_training(self) -> None:
@@ -619,93 +593,20 @@ class HyperSegmentationTrainer:
         return output
 
     def _check_image_completion(self, batch: dict) -> bool:
-        """Check if we have processed all patches for a complete image."""
-
-        # Method 1: Check batch metadata
-        if "is_last_patch" in batch and batch["is_last_patch"]:
-            return True
-
-        # Method 2: Check accumulated patches count
-        if self._patches_per_image is not None:
-            if len(self._accumulated_preds) >= self._patches_per_image:
-                return True
-
-        # Method 3: Check if we've reached a reasonable limit (safety check)
-        if len(self._accumulated_preds) >= 1000:  # Prevent infinite accumulation
-            self.log_msg(
-                "Warning: Accumulated too many patches, processing as complete image",
-                level="WARNING",
-            )
-            return True
-
-        return False
+        """Compatibility shell for legacy API."""
+        return True
 
     def _process_complete_hypersigma_image(self):
-        """Process a complete hyperspectral image and compute loss."""
-
-        if not self._accumulated_preds:
-            raise ValueError("No accumulated predictions to process.")
-
-        # Reconstruct complete image from patches
-        pred_2d, pred_indexed_1d, gt_indexed_1d = self._reconstruct_hypersigma_image()
-
-        # NOTE: Bootstrap for HyperSIGMA mode is tricky because we reconstruct
-        # from patches. If we want to bootstrap, we ideally need the full image
-        # probability map to do entropy selection on the whole image.
-        # But `pred_2d` here IS the full image prediction from patches.
-        # However, `boost_strap_update_label` expects `model` to run separate inference.
-        # Running inference AGAIN on full image might be too heavy or duplicate work.
-        # `prior` implementation of boost_strap_update_label runs model(img).
-        # Here we already have pred_2d.
-        # So we might need to modify boost_strap_update_label or implement similar logic here manually
-        # using the existing `pred_2d`.
-
-        # For now, let's skip bootstrap for HyperSIGMA mode or warn it's not supported fully yet
-        # unless we pass the full image `img` which isn't available here directly
-        # (we only have accumulated preds).
-
-        # Actually, let's ONLY support it for standard `train_segment_step` for now as per user request context.
-        # If needed for HyperSIGMA, we need access to the full image to run `boost_strap_update_label`.
-
-        loss = self.compute_segmentation_loss(pred_indexed_1d, gt_indexed_1d)
-        self._accumulated_preds.clear()
-
-        return SegmentationOutput(loss=loss, pred_pixel=pred_2d)
+        raise RuntimeError(
+            "HyperSIGMA accumulation path is no longer supported in HyperSegmentationTrainer. "
+            "Use standard segmentation train_step instead."
+        )
 
     def _reconstruct_hypersigma_image(self, accumulated_preds: list[Tensor] | None = None, mode="train"):
-        """Reconstruct complete hyperspectral image from accumulated patches."""
-
-        # Stack all predictions
-        # (total_patches, C, H, W)
-        if accumulated_preds is None:
-            accumulated_preds = self._accumulated_preds
-        all_preds = torch.cat(accumulated_preds, dim=0)
-
-        ds: SingleImageHyperspectralSegmentationDataset = self.train_dataset if mode == "train" else self.val_dataset  # type: ignore
-        index = ds._sampled_index
-        gt_indexed_1d = ds.gt_for_loss  # (indices,)
-        n_row, n_cols = ds.n_rows, ds.n_cols
-        hp, wp = all_preds[0].shape[-2:]
-        assert ds.total_patches == all_preds.shape[0], f"{all_preds.shape[0]=} should equal to {ds.total_patches=}"
-
-        # Revert back to a full image
-        pred_1d = rearrange(
-            all_preds,
-            "(nh nw) n_class hp wp -> (nh hp nw wp) n_class",
-            nh=n_row,
-            nw=n_cols,
+        raise RuntimeError(
+            "HyperSIGMA reconstruction path is no longer supported in HyperSegmentationTrainer. "
+            "Use standard validation path instead."
         )
-        pred_2d = rearrange(
-            pred_1d,
-            "(h w) n_class -> n n_class h w",
-            h=n_row * hp,
-            w=n_cols * wp,
-            n=1,
-        )
-        pred_indexed_1d = pred_1d[index]
-        gt_indexed_1d = gt_indexed_1d.to(pred_1d.device)
-
-        return pred_2d, pred_indexed_1d, gt_indexed_1d
 
     def _optimize_step(self, loss: Tensor):
         if self.accelerator.sync_gradients:
@@ -787,49 +688,16 @@ class HyperSegmentationTrainer:
         batch: dict,
         macro_batch_size: int = 32,
     ):
-        """HyperSIGMA-style training step: accumulate predictions and compute loss after full image."""
-
-        # Forward pass without computing loss yet
-        macro_outputs = self._macro_forward_seg_model(batch, macro_batch_size)
-        # Store predictions and metadata for later loss computation
-        self._accumulated_preds = macro_outputs
-
-        # Store sample indices if available
-        if "sample_index" in batch:
-            self._accumulated_indices.append(batch["sample_index"].detach())
-
-        # Check if we have completed a full image
-        # is_image_complete = self._check_image_completion(batch)
-        # anyway, I temp set to True
-        is_image_complete = True
-
-        if is_image_complete:
-            # Process the complete image and compute loss
-            out = self._process_complete_hypersigma_image()
-            self._optimize_step(out.loss)
-            return out
-        else:
-            raise NotImplementedError("Not implemented yet")
-            return None
+        _ = macro_batch_size
+        self.log_msg(
+            "train_single_img_accum_step is deprecated and falls back to train_segment_step.",
+            level="WARNING",
+        )
+        return self.train_segment_step(batch["img"], batch["gt"])
 
     def train_step(self, batch: dict):
-        # NOTE: in HyperSIGMA mode: the batch is a single image patches, to input
-        # the segmented model, we use a 'macro-batch' to control the input-model-batch-size
-
-        # Check if we should use HyperSIGMA-style indexing
-        use_batch_accum = hasattr(batch, "sample_index") or "sample_index" in batch
-        if use_batch_accum:
-            self._current_sample_index = batch.get("sample_index", None)
-
-        if self._use_single_img_indexing:
-            # HyperSIGMA mode: accumulate predictions
-            with self.accelerator.accumulate(self.model):  # use gradient accmulation ?
-                train_out = self.train_single_img_accum_step(batch, self.macro_batch_size)
-        else:
-            # Standard mode: process immediately
-            with self.accelerator.accumulate(self.model):
-                # train segmentation model
-                train_out = self.train_segment_step(batch["img"], batch["gt"])
+        with self.accelerator.accumulate(self.model):
+            train_out = self.train_segment_step(batch["img"], batch["gt"])
 
         # update training state
         self.step_train_state()
@@ -975,43 +843,35 @@ class HyperSegmentationTrainer:
         torch.Tensor
             Predicted segmentation map
         """
-        if self._use_single_img_indexing:
-            use_batch_accum = "sample_index" in batch
-            if use_batch_accum:
-                self._current_sample_index = batch.get("sample_index", None)
-            macro_outputs = self._macro_forward_seg_model(batch, self.macro_batch_size)
-            # revert back to a full image
-            pred_seg, *_ = self._reconstruct_hypersigma_image(macro_outputs, mode="val")
+
+        def _val_model_closure(batch):
+            # forward the segmentation network
+            pred_pixel = self._forward_val_logits(batch)
+            return {"pred_logits": pred_pixel}
+
+        # slide windows
+        if getattr(self.train_cfg, "val_slide_window", False):
+            logger.info(f"[Val]: using slide window validation")
+            val_slide_window_kwargs = dict(getattr(self.train_cfg, "val_slide_window_kwargs", {}))
+            val_slide_window_kwargs.setdefault("online_merge", True)
+            model_outputs = model_predict_patcher(
+                _val_model_closure,
+                batch,
+                patch_keys=["img", "gt"],
+                merge_keys=["pred_logits"],
+                **val_slide_window_kwargs,
+            )
+            pred_logits = model_outputs["pred_logits"]
         else:
+            logger.info(f"[Val]: using full image validation", once=True)
+            pred_logits = _val_model_closure(batch)["pred_logits"]
 
-            def _val_model_closure(batch):
-                # forward the segmentation network
-                pred_pixel = self._forward_val_logits(batch)
-                return {"pred_logits": pred_pixel}
-
-            # slide windows
-            if getattr(self.train_cfg, "val_slide_window", False):
-                logger.info(f"[Val]: using slide window validation")
-                val_slide_window_kwargs = dict(getattr(self.train_cfg, "val_slide_window_kwargs", {}))
-                val_slide_window_kwargs.setdefault("online_merge", True)
-                model_outputs = model_predict_patcher(
-                    _val_model_closure,
-                    batch,
-                    patch_keys=["img", "gt"],
-                    merge_keys=["pred_logits"],
-                    **val_slide_window_kwargs,
-                )
-                pred_logits = model_outputs["pred_logits"]
-            else:
-                logger.info(f"[Val]: using full image validation", once=True)
-                pred_logits = _val_model_closure(batch)["pred_logits"]
-
-            img_h, img_w = batch["img"].shape[-2:]
-            if pred_logits.shape[-2:] != (img_h, img_w):
-                pred_logits = torch.nn.functional.interpolate(
-                    pred_logits, size=(img_h, img_w), mode="bilinear", align_corners=False
-                )
-            pred_seg = pred_logits.argmax(1)
+        img_h, img_w = batch["img"].shape[-2:]
+        if pred_logits.shape[-2:] != (img_h, img_w):
+            pred_logits = torch.nn.functional.interpolate(
+                pred_logits, size=(img_h, img_w), mode="bilinear", align_corners=False
+            )
+        pred_seg = pred_logits.argmax(1)
 
         return pred_seg
 
@@ -1380,6 +1240,7 @@ _configs_dict = {
     "atlantic_forest_hybrid_tokenizer_seg": "atlantic_forest_hybrid_tokenizer_seg",
     "deeplabv3_seg": "deeplabv3_seg",
     "unet_seg": "unet_seg",
+    "single_hyper_image_indian_pines_unet_seg": "single_hyper_image_indian_pines_unet_seg",
 }
 
 

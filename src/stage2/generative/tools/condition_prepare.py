@@ -5,7 +5,7 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Callable, Literal, cast, no_type_check
+from typing import Any, Callable, Literal, cast, no_type_check
 
 import cv2
 import numpy as np
@@ -29,6 +29,44 @@ def rsshow(I, scale=0.005):
     I[I < low] = low
     I = (I - low) / (high - low)
     return I
+
+
+def _normalize_caption_result(result: dict[str, Any]) -> dict[str, Any]:
+    caption_txt = str(result.get("caption", ""))
+    return {
+        "caption": caption_txt,
+        "valid_length": int(result.get("valid_length", len(caption_txt))),
+        "caption_feature": result.get("caption_feature", None),
+        "attention_mask": result.get("attention_mask", None),
+    }
+
+
+def _build_caption_annotator(device: str) -> tuple[Any, Callable[[np.ndarray | str], dict[str, Any]]]:
+    backend = os.getenv("CAPTION_BACKEND", "qwen25vl").strip().lower()
+    if backend == "internvl35":
+        from src.stage2.generative.tools.conditions.caption.InternVL35_caption import (
+            get_intervl35_model,
+        )
+
+        model, ann = get_intervl35_model(encode=False, device=device, stream=False)
+
+        def _caption_fn(image: np.ndarray | str) -> dict[str, Any]:
+            out = ann(image)
+            if not isinstance(out, dict):
+                out = next(out)
+            return _normalize_caption_result(cast(dict[str, Any], out))
+
+        return model, _caption_fn
+
+    model, ann = get_qwen25vl_model(encode=True, device=device)
+
+    def _caption_fn(image: np.ndarray | str) -> dict[str, Any]:
+        out = ann(image)
+        if not isinstance(out, dict):
+            out = next(out)
+        return _normalize_caption_result(cast(dict[str, Any], out))
+
+    return model, _caption_fn
 
 
 class UnifiedAnnotator:
@@ -67,8 +105,8 @@ class UnifiedAnnotator:
             case "mlsd":
                 self.annotator = MLSDdetector()
             case "caption":
-                self._ann_inner_model, self.annotator = get_qwen25vl_model(encode=True)
-                self.annotator = cast(Callable[[np.ndarray | str], str], self.annotator)
+                self._ann_inner_model, self.annotator = _build_caption_annotator(self.device)
+                self.annotator = cast(Callable[[np.ndarray | str], dict[str, Any]], self.annotator)
             case "content":
                 pass
 
@@ -154,7 +192,7 @@ class UnifiedAnnotator:
         """
         assert os.path.exists(path), "Image path does not exist."
         image = cv2.imread(path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # type: ignore[arg-type]
         image = rsshow(np.array(image), 0)
         image = (image * 255).astype(np.uint8)
 
@@ -360,7 +398,7 @@ if __name__ == "__main__":
     for fn in tqdm(fns):
         fn_path = os.path.join(data_dir, fn)
         image = cv2.imread(fn_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # type: ignore[arg-type]
         image = rsshow(np.array(image), 0)
         image = (image * 255).astype(np.uint8)
 

@@ -14,20 +14,284 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any, Sequence
+
 import torch
-from diffusers import AutoencoderDC
-from diffusers.models import AutoencoderKL
+from torch import Tensor, nn
+from typing import cast
+from loguru import logger
+from peft import PeftModel
+from diffusers import AutoencoderDC, AutoencoderKL
 from mmengine.registry import Registry
 from termcolor import colored
 from transformers import AutoModelForCausalLM, AutoTokenizer, T5EncoderModel, T5Tokenizer
 from transformers import logging as transformers_logging
 
+from src.stage1.cosmos.cosmos_tokenizer import ContinuousImageTokenizer
 from src.stage2.generative.Sana.diffusion.model.dc_ae.efficientvit.ae_model_zoo import DCAE_HF
 from src.stage2.generative.Sana.diffusion.model.utils import set_fp32_attention, set_grad_checkpoint
+
 
 MODELS = Registry("models")
 
 transformers_logging.set_verbosity_error()
+
+
+def _match_dim(x: Tensor) -> Tensor:
+    if x.numel() > 1 and x.ndim == 1:
+        x = x[None].view(-1, -1, 1, 1)
+    return x
+
+
+class CosmosRSVAE(nn.Module):
+    """
+    Cosmos_RS VAE wrapper (encode/decode) consistent with
+    `src/stage2/generative/Sana/diffusion/model/builder.py` cosmos_RS branch.
+    """
+
+    latent_channels: int = 16
+    spatial_compression: int = 8
+
+    def __init__(
+        self,
+        *,
+        model_path: str,
+        lora_path: str | None = None,
+        device: str | torch.device = "cuda",
+        dtype: str = "bf16",
+        tokenizer_overrides: dict[str, Any] | None = None,
+        scale_shift_type: str | None = None,
+        scaling_factor: list[float] | float | None = None,
+        shift_factor: list[float] | float | None = None,
+    ) -> None:
+        super().__init__()
+        if dtype not in {"bf16", "fp32"}:
+            raise ValueError(f"Unsupported {dtype=}, expected 'bf16' or 'fp32'.")
+        self._dtype = torch.bfloat16 if dtype == "bf16" else torch.float32
+        self._device = torch.device(device)
+
+        model_cfg = dict(
+            attn_resolutions=[32],
+            channels=128,
+            channels_mult=[2, 4, 4],
+            dropout=0.0,
+            in_channels=512,
+            spatial_compression=self.spatial_compression,
+            num_res_blocks=2,
+            out_channels=512,
+            resolution=1024,
+            z_channels=256,
+            latent_channels=self.latent_channels,
+            act_checkpoint=False,
+            norm_type="rmsnorm2d",
+            act_type="silu",
+            block_name="res_block",
+            use_residual_factor=False,
+            patch_method="haar",
+            patch_size=1,
+            attn_type="none",
+            padding_mode="reflect",
+            adaptive_mode="interp",
+        )
+        if tokenizer_overrides:
+            model_cfg.update(tokenizer_overrides)
+
+        self.ae = ContinuousImageTokenizer.create_model(
+            model=dict(**model_cfg),
+            uni_path=model_path,
+            loading_type="pretrained",
+            qunatizer_type=None,
+            hook_for_repa=False,
+            use_repa_loss=False,
+            use_vf_loss=False,
+            vf_on_z_or_module="z",
+            z_factor=1,
+        )
+        logger.success("Load base VAE from {}".format(model_path))
+
+        # lora load
+        if lora_path is not None:
+            peft_model = PeftModel.from_pretrained(self.ae, model_id=lora_path, ignore_mismatched_sizes=True)
+            if hasattr(peft_model, "merge_and_unload"):
+                self.ae = peft_model.merge_and_unload()
+            else:
+                peft_model.merge_adapter()
+                self.ae = peft_model
+            self.ae.eval()
+            logger.success("Load LoRA from {} and fused into base model".format(lora_path))
+            logger.info(f"LoRA fused model type: {type(self.ae).__name__}")
+        self.ae = self.ae.to(device=self._device, dtype=self._dtype).eval()
+
+        if scaling_factor is None or shift_factor is None:
+            sf, sh = self._get_scale_shift(ae_type=scale_shift_type)
+        else:
+            sf = list(scaling_factor) if isinstance(scaling_factor, Sequence) else scaling_factor
+            sh = list(shift_factor) if isinstance(shift_factor, Sequence) else shift_factor
+        sf = torch.tensor(sf, device=self._device, dtype=self._dtype)
+        sh = torch.tensor(sh, device=self._device, dtype=self._dtype)
+        if sf.numel() > 1:
+            sf = sf.view(1, self.latent_channels, 1, 1)
+        if sh.numel() > 1:
+            sh = sh.view(1, self.latent_channels, 1, 1)
+
+        self.register_buffer("scaling_factor", sf, persistent=False)
+        self.register_buffer("shift_factor", sh, persistent=False)
+
+        logger.info(f"CosmosRSVAE device={self._device}, dtype={self._dtype}")
+        logger.info(f"Use scaling factor: {sf}")
+        logger.info(f"Use shift factor: {sh}")
+
+    @torch.no_grad()
+    def encode(self, images: Tensor, no_std: bool = False) -> Tensor:
+        scaling_factor_buf = cast(Tensor, self.scaling_factor)
+        shift_factor_buf = cast(Tensor, self.shift_factor)
+
+        images = images.to(dtype=self._dtype, device=scaling_factor_buf.device)
+        scaling_factor = _match_dim(scaling_factor_buf.to(images))
+        shift_factor = _match_dim(shift_factor_buf.to(images))
+
+        with torch.autocast(
+            device_type=images.device.type,
+            dtype=torch.bfloat16 if self._dtype == torch.bfloat16 else torch.float32,
+        ):
+            z = self.ae.encode(images)
+
+        if isinstance(z, tuple):
+            z = z[0]
+        elif isinstance(z, dict):
+            z = z["latent"]
+        elif torch.is_tensor(z):
+            pass
+        else:
+            raise TypeError(f"Unexpected encode output type: {type(z)}")
+        if not no_std:
+            z = z.sub(shift_factor.to(z)).div(scaling_factor.to(z))
+        return z
+
+    @torch.no_grad()
+    def decode(self, latent: Tensor, *, inp_shape: torch.Size | int, no_std: bool = False) -> Tensor:
+        return self._decode_impl(latent, inp_shape=inp_shape, no_std=no_std)
+
+    def decode_with_grad(self, latent: Tensor, *, inp_shape: torch.Size | int, no_std: bool = False) -> Tensor:
+        """Decode latent with gradient support.
+
+        This is used for pixel-space supervision: gradients should flow to the latent
+        (and thus to the cloud-removal model), while VAE parameters remain frozen.
+        """
+        return self._decode_impl(latent, inp_shape=inp_shape, no_std=no_std)
+
+    def _decode_impl(self, latent: Tensor, *, inp_shape: torch.Size | int, no_std: bool) -> Tensor:
+        scaling_factor_buf = cast(Tensor, self.scaling_factor)
+        shift_factor_buf = cast(Tensor, self.shift_factor)
+
+        latent = latent.to(dtype=self._dtype, device=scaling_factor_buf.device)
+        scaling_factor = _match_dim(scaling_factor_buf.to(latent))
+        shift_factor = _match_dim(shift_factor_buf.to(latent))
+
+        if not no_std:
+            latent = latent.mul(scaling_factor.to(latent)).add(shift_factor.to(latent))
+        with torch.autocast(
+            device_type=latent.device.type,
+            dtype=torch.bfloat16 if self._dtype == torch.bfloat16 else torch.float32,
+        ):
+            decoded = self.ae.decode(latent, inp_shape=inp_shape)
+
+        if isinstance(decoded, tuple):
+            decoded = decoded[0]
+        elif isinstance(decoded, dict):
+            decoded = decoded["recon"]
+        elif torch.is_tensor(decoded):
+            pass
+        else:
+            raise TypeError(f"Unexpected decode output type: {type(decoded)}")
+
+        return decoded
+
+    def _get_scale_shift(self, ae_type: str | None = "ae"):
+        if ae_type is None:
+            ae_type = "lcr"
+
+        # ae and lcr reg: two version of pretrained vae
+        if ae_type == "lcr":
+            shift = [
+                -1.4291600526869297,
+                -0.4082975222915411,
+                -1.0497894948720932,
+                -1.4701983284950257,
+                -1.7765559741854668,
+                -0.8735650272667408,
+                1.1257692495174707,
+                0.039055027384310964,
+                -0.7113604667782784,
+                -0.13758214071393013,
+                0.6148364602774382,
+                -0.6186087974905968,
+                -0.7121491965651512,
+                1.2216752705536782,
+                -1.3880603381455876,
+                -0.45283570379018784,
+            ]
+            scale = [
+                0.42588172074344655,
+                0.8176063984445395,
+                0.61324094397192,
+                0.4221144967798025,
+                0.7483219732102587,
+                0.458599659957132,
+                0.7212014900244281,
+                0.5361430005310517,
+                0.45571632195680367,
+                0.7655523709791279,
+                0.4172092222154172,
+                0.5363149351470319,
+                0.7398311229856277,
+                0.691116324846224,
+                0.7972184947063319,
+                0.8416582425637736,
+            ]
+        elif ae_type == "ae":
+            shift = [
+                -0.3395568211376667,
+                -0.22520461447536946,
+                0.0372724512219429,
+                -0.10425473003648222,
+                -0.12993480741977692,
+                0.15024892359972,
+                0.6248297291994095,
+                0.1264730566367507,
+                -0.24228530898690223,
+                0.09681867036037148,
+                0.11547808751463891,
+                -0.15777894280850888,
+                -0.09696531526744366,
+                0.25315030217170714,
+                -0.21809950307011605,
+                -0.16787929370999335,
+            ]
+            scale = [
+                0.11568219267030617,
+                0.19795570742383053,
+                0.1653055727663197,
+                0.10820484436353721,
+                0.1673998085487709,
+                0.07892267036023079,
+                0.23162721283100093,
+                0.1229123996528739,
+                0.10866767695586152,
+                0.18754874772861008,
+                0.0867098794162515,
+                0.17479499629405454,
+                0.1599094335227425,
+                0.15633937637654485,
+                0.20044135354362982,
+                0.15534570714645543,
+            ]
+        else:
+            raise ValueError(f"Unsupported ae_type: {ae_type}. Expected 'lcr' or 'ae'.")
+
+        return scale, shift
 
 
 def build_model(cfg, use_grad_checkpoint=False, use_fp32_attention=False, gc_step=1, **kwargs):
@@ -100,6 +364,8 @@ def get_tokenizer_and_text_encoder(
 
 
 def get_vae(name, model_path, device="cuda", **kwargs):
+    logger.info(f"Loading VAE: {name} with {kwargs=}")
+
     if name == "sdxl" or name == "sd3":
         model_name = "stabilityai/stable-diffusion-xl-base-1.0"
         vae = AutoencoderKL.from_pretrained(model_name, subfolder="vae").to(device).to(torch.float16)
@@ -126,7 +392,7 @@ def get_vae(name, model_path, device="cuda", **kwargs):
         return dc_ae
 
     # remote sensing cosmos AE
-    elif "cosmos_RS" in name:
+    elif "cosmos_RS" == name:
         print(colored(f"[Cosmos RS] Loading model from {model_path}", attrs=["bold"]))
         from src.stage1.cosmos.cosmos_tokenizer import ContinuousImageTokenizer
         from src.stage1.cosmos.lora_mixin import TokenizerLoRAMixin
@@ -164,9 +430,13 @@ def get_vae(name, model_path, device="cuda", **kwargs):
             vf_on_z_or_module="z",
             z_factor=1,
         )
+
+        # deprecated ----
         # cosmos_ae_lora = TokenizerLoRAMixin(cosmos_ae, **kwargs)
         # cosmos_ae_lora.requires_grad_(False)
         # return cosmos_ae.to(device=device, dtype=torch.bfloat16).eval()
+        # -----
+
         cosmos_ae = cosmos_ae.to(device=device, dtype=torch.bfloat16).eval()
         # fmt: off
         cosmos_ae.scaling_factor = torch.tensor(
@@ -179,9 +449,23 @@ def get_vae(name, model_path, device="cuda", **kwargs):
         ).view(1, 16, 1, 1)
         # fmt: on
         return cosmos_ae.eval()
+
+    elif "cosmos_RS_lora" == name:
+        vae = CosmosRSVAE(
+            model_path=model_path,
+            lora_path=kwargs.get("lora_path"),
+            device=device,
+            dtype=kwargs.get("dtype", "bf16"),
+            scale_shift_type=kwargs.get("scale_shift_type"),
+            scaling_factor=kwargs.get("scaling_factor"),
+            shift_factor=kwargs.get("shift_factor"),
+        )
+        return vae.eval()
+
     else:
-        print("error load vae")
-        exit()
+        _msg = "error load vae"
+        logger.critical(_msg)
+        raise ValueError(_msg)
 
 
 def match_dim(x: torch.Tensor):
@@ -210,8 +494,8 @@ def vae_encode(name, vae, images, sample_posterior, device: torch.device):
         z = ae.encode(images.to(device))[0]
         z = z * scaling_factor
 
-    ######## remote sensing cosmos AE
-    elif "cosmos_RS" in name:
+    # --------- remote sensing cosmos AE --------
+    elif name in {"cosmos_RS", "cosmos_RS_lora"}:
         ae = vae
         images = images.to(device, torch.bfloat16)
         scaling_factor = torch.as_tensor(ae.scaling_factor).to(images)
@@ -222,12 +506,14 @@ def vae_encode(name, vae, images, sample_posterior, device: torch.device):
             "scaling_factor and shift_factor must be set for cosmos_RS, please check the class attribution"
         )
 
-        with torch.autocast(device_type=str(device), dtype=torch.bfloat16):
+        with torch.autocast(device_type=images.device.type, dtype=torch.bfloat16):
             z = ae.encode(images)
         if isinstance(z, tuple):
             z = z[0]
         elif isinstance(z, dict):
             z = z["latent"]
+        elif isinstance(z, Tensor):
+            pass
         else:
             raise ValueError("z must be a tuple or dict")
         z.sub_(shift_factor.to(z)).div_(scaling_factor.to(z))
@@ -264,19 +550,22 @@ def vae_decode(name, vae, latent, **kwargs):
             ae.enable_tiling(tile_sample_min_height=1024, tile_sample_min_width=1024)
             samples = ae.decode(latent / scaling_factor, return_dict=False)[0]
 
-    elif "cosmos_RS" in name:
+    elif name in {"cosmos_RS", "cosmos_RS_lora"}:
+        from src.stage1.cosmos.cosmos_tokenizer import ContinuousImageTokenizer
+
         scaling_factor = torch.as_tensor(vae.scaling_factor).to(latent)
         shift_factor = torch.as_tensor(vae.shift_factor).to(latent)
+        vae = cast(CosmosRSVAE | ContinuousImageTokenizer, vae)
 
         scaling_factor, shift_factor = map(match_dim, (scaling_factor, shift_factor))
         assert scaling_factor is not None and shift_factor is not None, (
             "scaling_factor and shift_factor must be set for cosmos_RS, please check the class attribution"
         )
 
-        latent.mul_(scaling_factor.to(latent)).add_(shift_factor.to(latent))
-        with torch.autocast(device_type=str(latent.device), dtype=torch.bfloat16):
+        latent = latent.mul(scaling_factor.to(latent)).add(shift_factor.to(latent))
+        with torch.autocast(device_type=latent.device.type, dtype=torch.bfloat16):
             shape = kwargs.get("input_shape", 3)  # [b,c,h,w]
-            samples = vae.decode(latent, shape)
+            samples = vae.decode(latent, inp_shape=shape)
 
         if isinstance(samples, tuple):
             samples = samples[0]

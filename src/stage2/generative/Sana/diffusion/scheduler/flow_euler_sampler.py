@@ -47,7 +47,8 @@ class FlowEuler:
             prompt_embeds = torch.cat([self.uncondition, self.condition], dim=0)
 
         for i, t in tqdm(
-            list(enumerate(timesteps)), disable=os.getenv("DPM_TQDM", "False") == "True"
+            list(enumerate(timesteps)), disable=os.getenv("DPM_TQDM", "False") == "True", desc="Flow Euler Sampling ...",
+            leave=False,
         ):
             # expand the latents if we are doing classifier free guidance
             latent_model_input = (

@@ -75,6 +75,13 @@ local_qwen_ckpt = "/Data/ZiHanCao/checkpoints/Qwen/Qwen2___5-VL-7B-Instruct"
 remote_qwen_ckpt = "Qwen/Qwen2.5-VL-7B-Instruct"
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def get_qwen25vl_model(
     ckpt: str = remote_qwen_ckpt,
     max_tokens: int = max_tokens,
@@ -83,6 +90,9 @@ def get_qwen25vl_model(
     device="cuda",
     stream=False,
 ):
+    ckpt = os.getenv("QWEN25VL_CKPT", ckpt)
+    local_files_only = _env_flag("QWEN25VL_LOCAL_ONLY", default=False)
+
     # default: Load the model on the available device(s)
     # model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     #     "Qwen/Qwen2.5-VL-7B-Instruct", torch_dtype="auto", device_map="auto"
@@ -94,16 +104,18 @@ def get_qwen25vl_model(
         torch_dtype=torch.bfloat16,
         # attn_implementation="flash_attention_2",
         device_map=device,
+        local_files_only=local_files_only,
     ).eval()
 
-    # default processor
-    processor = AutoProcessor.from_pretrained(ckpt)
     # The default range for the number of visual tokens per image in the model is 4-16384.
     # You can set min_pixels and max_pixels according to your needs, such as a token range of 256-1280, to balance performance and cost.
     min_pixels = 256 * 28 * 28
     max_pixels = 1280 * 28 * 28
     processor = AutoProcessor.from_pretrained(
-        "Qwen/Qwen2.5-VL-7B-Instruct", min_pixels=min_pixels, max_pixels=max_pixels
+        ckpt,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+        local_files_only=local_files_only,
     )
     print(f"Loaded Qwen2.5-VL model from {ckpt} and processor")
 

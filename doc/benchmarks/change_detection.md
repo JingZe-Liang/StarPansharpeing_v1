@@ -3,7 +3,7 @@
 [Val]: accuracy: 0.5541 - precision: 0.2661 - recall: 0.9240 - kappa: 0.2029 - mean_iou: 0.3605 - f1_score: 0.4132 - mean_accuracy: 0.7012 - iou: 0.2604 - fwiou: 0.4352 -  loss: 0.000e+00
 
 
-# XBD
+# XBD (xView2)
 
 [Val]: accuracy: 0.9688 - precision: 0.6618 - recall: 0.9528 - kappa: 0.7649 - mean_iou: 0.7780 - f1_score: 0.7811 - mean_accuracy: 0.9613 - iou: 0.6408 - fwiou: 0.9478 -  loss: 0.000e+00
 

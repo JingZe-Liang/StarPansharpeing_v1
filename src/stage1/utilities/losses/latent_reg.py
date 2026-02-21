@@ -190,9 +190,8 @@ def _sample_t_distributional(
         )
         t = dist.sample((bs,))
 
-    # Default: standard normal, absolute value then clamp to [0,1] for stability
     else:
-        t = torch.abs(torch.rand((bs,), device=device))
+        raise ValueError(f"noise_type_cfg {noise_type_cfg} not supported")
 
     return t
 

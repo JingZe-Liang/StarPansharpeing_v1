@@ -155,6 +155,9 @@ wandb/
 **/papers
 logs/
 
+# other repos
+**/third_party/**
+
 *.png
 *.jpg
 **.pt
@@ -172,6 +175,8 @@ src/stage1/sana_dcae/pretrained
 src/stage2/generative/tools/conditions/caption/Qwen25_VL
 src/stage2/generative/tools/conditions/caption/caption_weights
 src/stage2/generative/Sana/weights
+src/stage2/generative/GLIGEN/gligen_checkpoints
+src/stage2/generative/VideoX_Fun/*
 **/paper/
 
 # AI related

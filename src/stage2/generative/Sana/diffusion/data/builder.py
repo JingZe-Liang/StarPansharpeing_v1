@@ -16,6 +16,7 @@
 
 import os
 import time
+from typing import Any
 
 from mmengine.registry import Registry, build_from_cfg
 from termcolor import colored
@@ -56,6 +57,7 @@ def collate_fn_sana():
     Sana dataset返回格式:
     (img, caption, attention_mask, data_info, idx, caption_type, dataindex_info, clipscore)
     """
+
     def inner(batch: list):
         # 过滤None样本
         orig_len = len(batch)
@@ -65,15 +67,26 @@ def collate_fn_sana():
             return None
         elif len(batch) < orig_len:
             logger = get_root_logger()
-            logger.warning(
-                f"Skipped {orig_len - len(batch)} None samples in batch. "
-                f"Remaining: {len(batch)}/{orig_len}"
-            )
+            logger.warning(f"Skipped {orig_len - len(batch)} None samples in batch. Remaining: {len(batch)}/{orig_len}")
 
         # 使用default_collate处理元组格式
         return default_collate(batch)
 
     return inner
+
+
+def _normalize_loader_kwargs(num_workers: int, kwargs: dict[str, Any]) -> dict[str, Any]:
+    loader_kwargs = dict(kwargs)
+    if num_workers <= 0:
+        loader_kwargs.pop("persistent_workers", None)
+        loader_kwargs.pop("prefetch_factor", None)
+        loader_kwargs["timeout"] = 0
+        return loader_kwargs
+
+    if "timeout" not in loader_kwargs:
+        # Fail fast instead of silently hanging on broken worker/sample.
+        loader_kwargs["timeout"] = 120
+    return loader_kwargs
 
 
 def build_dataset(cfg, resolution=224, **kwargs):
@@ -104,13 +117,19 @@ def build_dataloader(dataset, batch_size=256, num_workers=4, shuffle=True, **kwa
     if "collate_fn" not in kwargs:
         kwargs["collate_fn"] = collate_fn_sana()
 
+    kwargs = _normalize_loader_kwargs(num_workers=num_workers, kwargs=kwargs)
+    pin_memory = kwargs.pop("pin_memory", True)
+
     if "batch_sampler" in kwargs:
+        batch_sampler = kwargs.pop("batch_sampler")
+        collate_fn = kwargs.pop("collate_fn", None)
         dataloader = DataLoader(
             dataset,
-            batch_sampler=kwargs["batch_sampler"],
-            collate_fn=kwargs.get("collate_fn"),
+            batch_sampler=batch_sampler,
+            collate_fn=collate_fn,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=pin_memory,
+            **kwargs,
         )
     else:
         dataloader = DataLoader(
@@ -118,7 +137,7 @@ def build_dataloader(dataset, batch_size=256, num_workers=4, shuffle=True, **kwa
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=pin_memory,
             **kwargs,
         )
     return dataloader
