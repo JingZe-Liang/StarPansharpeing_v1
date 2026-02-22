@@ -12,7 +12,7 @@ defaults:
   - override hydra/job_logging: disabled
 
 dataset:
-  dataset_name: Houston13
+  dataset_name: Houston13_Raw
   train:
     cfg:
       dataset_kwargs:
@@ -74,7 +74,7 @@ train:
   is_neg_1_1: true
 
   resume_path:
-  ema_load_path:
+  ema_load_path: runs/stage2_segmentation_single_image/2026-02-21_21-13-49_single_hyper_image_Houston13_Raw_hybrid_decoder/ema
 
   bootstrap_ratio: 0.
   bootstrap_start_step: 0
@@ -82,7 +82,7 @@ train:
   segment_optim:
     _target_: heavyball.ForeachAdamW
     _partial_: true
-    lr: 3.0e-4
+    lr: 2.0e-4
     weight_decay: 0.0
     betas: ${tuple:[0.9, 0.95]}
     caution: true

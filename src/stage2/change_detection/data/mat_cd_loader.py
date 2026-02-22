@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from easydict import EasyDict as edict
 from einops import rearrange
 from kornia.augmentation import (
@@ -42,7 +43,7 @@ def get_default_transform():
     transform = AugmentationSequential(
         RandomHorizontalFlip(p=0.5),
         RandomVerticalFlip(p=0.5),
-        RandomRotation(degrees=90, p=0.5, align_corners=False),
+        # RandomRotation(degrees=90, p=0.5, align_corners=False),
         data_keys=["input", "input", "mask"],
         same_on_batch=False,
     )
@@ -112,15 +113,20 @@ class HyperspectralChangeDetectionDataset(Dataset):
         dataset_name: str,
         patch_size: Optional[int] = None,
         patch_mode: str = "random_0.2",
+        fixed_changed_num: int = 500,
+        fixed_unchanged_num: int = 500,
         stride: int = 1,
-        transform: Optional[Any] | Literal["default"] = None,
+        transform: Optional[Any] | Literal["default"] = "default",
         normalize: bool = True,
         to_neg_1_1: bool = False,
+        train_patch_upsample_to: int | None = None,
     ):
         self.data_root = data_root
         self.dataset_name = dataset_name
         self.patch_size = patch_size
         self.patch_mode = patch_mode
+        self.fixed_changed_num = int(fixed_changed_num)
+        self.fixed_unchanged_num = int(fixed_unchanged_num)
         self.stride = stride
         if transform == "default":
             transform = get_default_transform()
@@ -129,6 +135,7 @@ class HyperspectralChangeDetectionDataset(Dataset):
         self.transform = transform
         self.normalize = normalize
         self.to_neg_1_1 = to_neg_1_1
+        self.train_patch_upsample_to = train_patch_upsample_to
 
         if dataset_name not in self.DATASET_CONFIGS:
             raise ValueError(
@@ -144,6 +151,9 @@ class HyperspectralChangeDetectionDataset(Dataset):
         if patch_size is not None:
             if patch_mode == "slide":
                 self.patches = self._generate_patches_slide_windows()
+            elif patch_mode.startswith("fixed"):
+                changed_num, unchanged_num = self._resolve_fixed_patch_counts(patch_mode)
+                self.patches = self._generate_patches_with_fixed_num(changed=changed_num, unchanged=unchanged_num)
             elif patch_mode.startswith("random"):
                 ratio = float(patch_mode.split("_")[1])
                 self.patches = self._generate_patches_rnd_splits(train_splits=ratio)
@@ -164,7 +174,32 @@ class HyperspectralChangeDetectionDataset(Dataset):
             logger.debug(f"  GT shape: {self.gt.shape}")
             logger.debug(f"  Classes: {np.unique(self.gt)}")
 
-    def _load_data(self, remap_unknown_to: int | None = 255) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _resolve_fixed_patch_counts(self, patch_mode: str) -> tuple[int, int]:
+        """Resolve fixed changed/unchanged patch counts from patch_mode."""
+        # Supported:
+        # - fixed: use fixed_changed_num / fixed_unchanged_num
+        # - fixed_500: use same number for changed and unchanged
+        # - fixed_300_700: changed=300, unchanged=700
+        parts = patch_mode.split("_")
+        if len(parts) == 1:
+            changed_num = self.fixed_changed_num
+            unchanged_num = self.fixed_unchanged_num
+        elif len(parts) == 2:
+            changed_num = int(parts[1])
+            unchanged_num = int(parts[1])
+        elif len(parts) == 3:
+            changed_num = int(parts[1])
+            unchanged_num = int(parts[2])
+        else:
+            raise ValueError(
+                f"Invalid fixed patch mode: {patch_mode}. Use `fixed`, `fixed_<num>`, or `fixed_<changed>_<unchanged>`."
+            )
+
+        if changed_num <= 0 or unchanged_num <= 0:
+            raise ValueError(f"Fixed sample counts must be > 0, got changed={changed_num}, unchanged={unchanged_num}.")
+        return changed_num, unchanged_num
+
+    def _load_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Load hyperspectral images and ground truth."""
         # Load first image (t1)
         image1_path = os.path.join(self.data_root, self.config["image1_path"])
@@ -193,11 +228,9 @@ class HyperspectralChangeDetectionDataset(Dataset):
             gt[gt > 0] = 1
             gt[gt == 0] = 2
 
-        # All mapped to 1-changed, 0-unchanged
-        if remap_unknown_to is not None:
-            gt[gt == 0] = remap_unknown_to
-            gt[gt == 2] = 0  # unchanged
-            # gt[gt == 1] = 1  # changed
+        # Final mapping: unknown->255, changed->1, unchanged->0
+        gt[gt == 0] = 255
+        gt[gt == 2] = 0
         gt = gt.astype(np.int32)
 
         # Ensure consistent shapes
@@ -261,6 +294,71 @@ class HyperspectralChangeDetectionDataset(Dataset):
             img2.mul_(2.0).sub_(1.0)
 
         return img1.numpy(), img2.numpy()
+
+    def _generate_patches_with_fixed_num(self, changed: int = 500, unchanged: int = 500) -> list[dict[str, int]]:
+        """Generate fixed-number patches for changed and unchanged classes."""
+        h, w = self.gt.shape[-2:]
+        ps = self.patch_size
+        if ps is None:
+            raise ValueError("patch_size must be specified for fixed sampling.")
+
+        max_i = h - ps
+        max_j = w - ps
+        if max_i < 0 or max_j < 0:
+            raise ValueError(f"Image size ({h}, {w}) is smaller than patch size {ps}")
+
+        invalid_labels = {255, -1}
+        changed_label, unchanged_label = 1, 0
+        positions_by_label: dict[int, list[dict[str, int]]] = {
+            changed_label: [],
+            unchanged_label: [],
+        }
+
+        for i in range(max_i + 1):
+            for j in range(max_j + 1):
+                center_i = i + ps // 2
+                center_j = j + ps // 2
+                center_label = int(self.gt[center_i, center_j])
+                if center_label in invalid_labels:
+                    continue
+                if center_label not in positions_by_label:
+                    continue
+                positions_by_label[center_label].append(
+                    {
+                        "i": i,
+                        "j": j,
+                        "center_i": center_i,
+                        "center_j": center_j,
+                    }
+                )
+
+        generator = torch.Generator().manual_seed(2025)
+        patches: list[dict[str, int]] = []
+        specs = [
+            (changed_label, changed, "changed"),
+            (unchanged_label, unchanged, "unchanged"),
+        ]
+        for class_label, target_num, class_name in specs:
+            class_positions = positions_by_label[class_label]
+            available_num = len(class_positions)
+            if available_num == 0:
+                logger.warning(f"No valid positions found for {class_name} class.")
+                continue
+
+            if available_num <= target_num:
+                selected = class_positions
+                if available_num < target_num:
+                    logger.warning(
+                        f"{class_name} class only has {available_num} samples, fewer than requested {target_num}.",
+                    )
+            else:
+                selected_indices = torch.randperm(available_num, generator=generator)[:target_num].tolist()
+                selected = [class_positions[int(i)] for i in selected_indices]
+            patches.extend(selected)
+            logger.info(f"Selected {len(selected)} {class_name} patches from {available_num} candidates.")
+
+        logger.info(f"Fixed sampling generated {len(patches)} total patches.")
+        return patches
 
     def _generate_patches_rnd_splits(self, train_splits: float = 0.2):
         """Splits images into patches in one training-split ratio.
@@ -436,12 +534,15 @@ class HyperspectralChangeDetectionDataset(Dataset):
             # Return patch
             patch_info = self.patches[idx]
             i, j = patch_info["i"], patch_info["j"]
+            ps = self.patch_size
+            if ps is None:
+                raise ValueError("patch_size must be specified in patch mode.")
             # label = patch_info["label"]
 
             # Extract patches from both images
-            patch1 = self.image1[i : i + self.patch_size, j : j + self.patch_size, :]
-            patch2 = self.image2[i : i + self.patch_size, j : j + self.patch_size, :]
-            gt_patch = self.gt[i : i + self.patch_size, j : j + self.patch_size]
+            patch1 = self.image1[i : i + ps, j : j + ps, :]
+            patch2 = self.image2[i : i + ps, j : j + ps, :]
+            gt_patch = self.gt[i : i + ps, j : j + ps]
 
             # Convert to tensors and rearrange dimensions to (C, H, W)
             patch1 = torch.from_numpy(patch1).float().permute(2, 0, 1)
@@ -452,6 +553,33 @@ class HyperspectralChangeDetectionDataset(Dataset):
             if self.transform is not None:
                 patch1 = self.transform(patch1)
                 patch2 = self.transform(patch2)
+
+            if self.train_patch_upsample_to is not None:
+                tgt_size = int(self.train_patch_upsample_to)
+                if tgt_size <= 0:
+                    raise ValueError(f"train_patch_upsample_to must be > 0, got {tgt_size}")
+                patch1 = F.interpolate(
+                    patch1.unsqueeze(0),
+                    size=(tgt_size, tgt_size),
+                    mode="bilinear",
+                    align_corners=False,
+                ).squeeze(0)
+                patch2 = F.interpolate(
+                    patch2.unsqueeze(0),
+                    size=(tgt_size, tgt_size),
+                    mode="bilinear",
+                    align_corners=False,
+                ).squeeze(0)
+                label = (
+                    F.interpolate(
+                        label.unsqueeze(0).unsqueeze(0).float(),
+                        size=(tgt_size, tgt_size),
+                        mode="nearest",
+                    )
+                    .squeeze(0)
+                    .squeeze(0)
+                    .long()
+                )
 
             return {"img1": patch1, "img2": patch2, "gt": label}
 
@@ -548,6 +676,8 @@ def create_changed_detection_patch_loader(
     dataset_name: str,
     patch_size: int = 32,
     patch_mode: str = "random_0.2",
+    fixed_changed_num: int = 500,
+    fixed_unchanged_num: int = 500,
     stride: int = 1,
     batch_size: int = 16,
     micro_batch_size: int = 16,
@@ -559,15 +689,20 @@ def create_changed_detection_patch_loader(
     unchanged_label=0,
     to_neg_1_1=False,
     patch_outside=False,
+    train_patch_upsample_to: int | None = None,
 ):
     dataset = HyperspectralChangeDetectionDataset(
         data_root=data_root,
         dataset_name=dataset_name,
         patch_size=patch_size,
         patch_mode=patch_mode,
+        fixed_changed_num=fixed_changed_num,
+        fixed_unchanged_num=fixed_unchanged_num,
         stride=stride,
         transform=transform,
+        normalize=normalize,
         to_neg_1_1=to_neg_1_1,
+        train_patch_upsample_to=train_patch_upsample_to,
     )
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)

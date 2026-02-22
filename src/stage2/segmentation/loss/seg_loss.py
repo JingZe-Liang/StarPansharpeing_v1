@@ -75,7 +75,7 @@ class HyperSegmentationLoss(torch.nn.Module):
             normalized=False,
         )
 
-        self.loss_weights = loss_weights or (1.0, 1.0, 0.75, 0.5)
+        self.loss_weights = (1.0, 1.0, 0.75, 0.5) if loss_weights is None else loss_weights
         self.loss_weights = torch.as_tensor(self.loss_weights)
 
         # Register buffer for EMA class counts

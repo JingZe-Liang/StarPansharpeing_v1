@@ -36,7 +36,12 @@ class ChangeDetectionScore(HyperSegmentationScore):
             ignore_index=ignore_index,
         )
         if hasattr(self, "jaccard_score"):
-            self.jaccard_score = JaccardIndex(task="multiclass", num_classes=2, ignore_index=None, average="none")
+            self.jaccard_score = JaccardIndex(
+                task="multiclass",
+                num_classes=n_classes,
+                ignore_index=ignore_index,
+                average="none",
+            )
             self._all_metric_fns["jaccard"] = self.jaccard_score
 
     def _compute_custom_from_cm(self, cm: Tensor) -> dict[str, Tensor]:

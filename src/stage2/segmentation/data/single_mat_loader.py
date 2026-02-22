@@ -403,8 +403,32 @@ def _test_single_mat_loader():
         print(batch["gt"].shape, batch["gt"].unique())
 
 
+def _test_single_mat_houston_13_loader():
+    img_dir = "data/Downstreams/ClassificationCollection/cls"
+
+    ds = SingleMatDataset(
+        data_dir=img_dir,
+        dataset_name="Houston13_Raw",
+        samples_per_cls=10,
+        patch_size=128,
+        online_slice=True,
+        to_neg_1_1=True,
+        skip_bg=True,
+    )
+    print("Dataset length:", len(ds))
+    print("Image shape:", ds.img.shape, "GT shape:", ds.gt.shape)
+    print("GT unique labels:", np.unique(ds.gt))
+
+    train_loader = DataLoader(ds, batch_size=4, shuffle=True)
+    for batch in train_loader:
+        print(batch["img"].shape, "min:", float(batch["img"].min()), "max:", float(batch["img"].max()))
+        print(batch["gt"].shape, batch["gt"].unique())
+        break
+
+
 if __name__ == "__main__":
     """
     python -m src.stage2.segmentation.data.single_mat_loader
     """
-    _test_single_mat_loader()
+    # _test_single_mat_loader()
+    _test_single_mat_houston_13_loader()

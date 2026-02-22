@@ -1,28 +1,35 @@
-train_bs: 3
+train_bs: 8
 val_bs: 1
 
 # Configs
 data_type: null
 label_mode: seg
-patch_size: 128
+patch_size: ${dataset.infos.${dataset.dataset_name}.patch_size}
 stride: 32
 micro_batch_size: 12
-patch_mode: random_0.4
+patch_mode: random_0.99
+fixed_changed_num: 500
+fixed_unchanged_num: 500
+train_patch_upsample_to: null
 dataset_name: FarmLand
 
 infos:
   bayArea:
     shape: [600, 500, 224]
     num_classes: 2
+    patch_size: 64
   Hermiston:
     shape: [390, 200, 242]
-    num_classes: 6
+    num_classes: 2
+    patch_size: 64
   santaBarbara:
     shape: [984, 740, 224]
     num_classes: 2
+    patch_size: 64
   FarmLand:
     shape: [450, 140, 155]
     num_classes: 2
+    patch_size: 64
 
 consts:
   # Dynamically injected from infos based on dataset_name
@@ -43,6 +50,9 @@ train:
   patch_size: ${dataset.patch_size}
   stride: ${dataset.stride}
   patch_mode: ${dataset.patch_mode}
+  fixed_changed_num: ${dataset.fixed_changed_num}
+  fixed_unchanged_num: ${dataset.fixed_unchanged_num}
+  train_patch_upsample_to: ${dataset.train_patch_upsample_to}
 
 val:
   _target_: src.stage2.change_detection.data.mat_cd_loader.create_full_image_dataloader

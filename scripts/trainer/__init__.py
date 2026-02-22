@@ -15,6 +15,8 @@ _aliases = {
     # Change Detection
     "cd_configs": ("hyper_latent_change_detection_trainer", "_configs_dict"),
     "cd_key": ("hyper_latent_change_detection_trainer", "_key"),
+    "cd_single_configs": ("single_hyper_image_change_detection_trainer", "_configs_dict"),
+    "cd_single_key": ("single_hyper_image_change_detection_trainer", "_key"),
     # Denoising
     "denoise_configs": ("hyper_latent_denoise_trainer", "_configs_dict"),
     "denoise_key": ("hyper_latent_denoise_trainer", "_key"),
@@ -37,6 +39,7 @@ _lazy_getattr, _lazy_dir, _lazy_all = lazy_loader.attach(
     submod_attrs={
         "hyper_latent_classification_trainer": ["HyperClassificationTrainer"],
         "hyper_latent_change_detection_trainer": ["HyperCDTrainer"],
+        "single_hyper_image_change_detection_trainer": ["SingleHyperImageCDTrainer"],
         "hyper_latent_denoise_trainer": ["DenoisingTrainer"],
         "hyper_latent_pansharpening_trainer": ["PansharpeningTrainer"],
         "hyper_latent_segmentation_trainer": ["HyperSegmentationTrainer"],

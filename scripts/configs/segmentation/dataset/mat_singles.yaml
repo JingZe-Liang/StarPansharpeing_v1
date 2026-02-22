@@ -17,7 +17,7 @@ infos:
     shape: [349, 1905, 144]
     num_classes: 15 #16
     patch_size: 128
-    n_patches: 10
+    n_patches: 20
   Houston18:
     shape: [954, 210, 48]
     num_classes: 7 #8

@@ -30,6 +30,13 @@ from scripts.trainer.hyper_latent_change_detection_trainer import (
     _configs_dict as cd_configs,
 )
 from scripts.trainer.hyper_latent_change_detection_trainer import _key as cd_key
+from scripts.trainer.single_hyper_image_change_detection_trainer import (
+    SingleHyperImageCDTrainer,
+)
+from scripts.trainer.single_hyper_image_change_detection_trainer import (
+    _configs_dict as cd_single_configs,
+)
+from scripts.trainer.single_hyper_image_change_detection_trainer import _key as cd_single_key
 
 # Classification
 from scripts.trainer.hyper_latent_classification_trainer import HyperClassificationTrainer
@@ -85,6 +92,7 @@ trainer_mapping = {
     "unmixing": UnmixingTrainer,
     "segmentation": HyperSegmentationTrainer,
     "change_detection": HyperCDTrainer,
+    "change_detection_single": SingleHyperImageCDTrainer,
     "classification": HyperClassificationTrainer,
 }
 cfg_mapping = {
@@ -94,6 +102,7 @@ cfg_mapping = {
     "unmixing": unmixing_configs,
     "segmentation": seg_configs,
     "change_detection": cd_configs,
+    "change_detection_single": cd_single_configs,
     "classification": classification_configs,
 }
 default_cfg_mapping = {
@@ -103,6 +112,7 @@ default_cfg_mapping = {
     "unmixing": unmixing_key,
     "segmentation": seg_key,
     "change_detection": cd_key,
+    "change_detection_single": cd_single_key,
     "classification": classification_key,
 }
 config_path_mapping = {
@@ -112,6 +122,7 @@ config_path_mapping = {
     "unmixing": "../configs/unmixing",
     "segmentation": "../configs/segmentation",
     "change_detection": "../configs/change_detection",
+    "change_detection_single": "../configs/change_detection",
     "classification": "../configs/classification",
 }
 

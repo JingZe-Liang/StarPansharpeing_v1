@@ -151,6 +151,11 @@ class HyperSegmentationScore(nn.Module):
           This way: valid classes [0,1,...,N-1] become [1,2,...,N]
                     ignore_index (e.g., 255) becomes 0
           With include_bg=False, class 0 (ignore) is excluded from metrics
+
+          Specifical cases:
+            - ignore_index is None, include_bg=True, calculate 0 ... N metrics;
+            - ignore_index=N, include_bg=False, calculate 1 ... N-1 metrics, shift N to 0, and ignore 0.
+            These two cases are calculated at the same metrics.
         """
         # Classification metrics support ignore_index directly
         classification_metrics = {
@@ -357,6 +362,9 @@ def test_ignore_index():
     assert (results["accuracy"] >= 0).all() and (results["accuracy"] <= 1).all(), "Accuracy should be between 0 and 1"
 
     print("✓ Ignore index test passed")
+
+
+def test_ignored_index_include_bg_specical_cases(): ...
 
 
 def run_all_tests():
