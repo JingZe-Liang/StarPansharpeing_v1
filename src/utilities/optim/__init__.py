@@ -34,6 +34,12 @@ from .muon import Muon
 from .muon_fsdp import Muon as MounFSDP_v1
 from .muon_fsdp_v2 import Muon as MounFSDP_v2
 from .muon_fused import MuonFSDP
+from .magma_skipupdate_wrapper import (
+    MagmaMaskConfig,
+    MagmaSkipUpdateWrapper,
+    create_torch_magma_optimizer,
+    wrap_optimizer_with_magma,
+)
 from .muon_ball_fused import MuonBallFused
 from .spectral_ball_fused import SpectralBallFused
 from .normuon_fused import NorMuonFSDP
@@ -57,6 +63,8 @@ torch.serialization.add_safe_globals(
         Muon,
         MuonTriton,
         MuonFSDP,
+        MagmaMaskConfig,
+        MagmaSkipUpdateWrapper,
         MuonBallFused,
         SpectralBallFused,
         MounFSDP_v1,

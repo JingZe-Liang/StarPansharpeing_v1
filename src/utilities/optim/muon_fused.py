@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from collections.abc import Callable, Iterable
 from typing import Any, TypedDict
 import re
+import inspect
 
 import torch
 from loguru import logger
@@ -175,6 +176,7 @@ class MuonFSDP(Muon):
         muon_params_defaults: dict[str, Any] | None = None,
         oned_params_defaults: dict[str, Any] | None = None,
         qk_clip_options: dict[str, QKClipOption] | None = None,
+        magma_kwargs: dict | None = None,
     ):
         """
         Create a Muon optimizer with optional Kimi-style QK-Clip.
@@ -200,6 +202,12 @@ class MuonFSDP(Muon):
             qk_clip_threshold: QK-Clip threshold `tau`.
             qk_clip_alpha: Split exponent between query/key context branch. `Wq_c` uses `gamma**alpha`,
                 `Wk_c` uses `gamma**(1-alpha)`.
+            reg_mask_mode: Optional inline masking mode for all param groups.
+                One of {None, "magma", "skipupdate"}.
+            reg_mask_survival_prob: Bernoulli survival probability for masking.
+            reg_mask_tau: Temperature used by Magma's sigmoid(cos/tau).
+            reg_mask_ema_beta: EMA coefficient for Magma alignment state.
+            reg_mask_seed: Optional RNG seed for reproducible masking.
             muon_params_defaults: Extra defaults for Muon param groups.
             oned_params_defaults: Extra defaults for one-dimensional param groups.
             qk_clip_options: Mapping that defines how parameter names and tensor slices map to
@@ -244,9 +252,7 @@ class MuonFSDP(Muon):
 
         muon_params_defaults = {} if muon_params_defaults is None else muon_params_defaults
         oned_params_defaults = {} if oned_params_defaults is None else oned_params_defaults
-        # muon_abcs = gen_muon_consts(
-        #     MuonConfig(name="turbo_muon" if use_preconditioned else "su"),
-        # )
+
         muon_abcs = gen_muon_consts(MuonConfig(name="su"))
         if newton_schulz_func is not None:
             newton_schulz_func = lambda G, epsilon: zeropower_via_newtonschulz6_diff_abc(
@@ -263,6 +269,14 @@ class MuonFSDP(Muon):
                 f"use_triton={use_triton}, use_preconditioned={use_preconditioned}",
             )
 
+        # check if support magma kwargs
+        support_kwargs = inspect.signature(super().__init__).parameters.keys()
+        dd = {}
+        if "magma_kwargs" in support_kwargs:
+            dd |= {"magma_kwargs": magma_kwargs}
+        else:
+            logger.warning("[MuonFused]: magma_kwargs is not supported by the current version of Dion verson.")
+
         super().__init__(
             params,
             distributed_mesh,
@@ -277,6 +291,7 @@ class MuonFSDP(Muon):
             flatten,
             use_triton,
             newton_schulz_func,
+            **dd,
         )
 
         self.defaults["enable_qk_clip"] = enable_qk_clip
@@ -383,6 +398,7 @@ class MuonFSDP(Muon):
 
         return loss
 
+    # ------------------ QK-clip ----------------- #
     @torch.no_grad()
     def _apply_qk_clip(self, attention_max_logits: dict[str, torch.Tensor]) -> None:
         tau = float(self.defaults["qk_clip_threshold"])
@@ -473,6 +489,7 @@ class MuonFSDP(Muon):
                 if bool(mask[h].item()):
                     param[h].mul_(scale_factors[h])
 
+    # ---------------- Utils ---------------- #
     def _get_param_name(self, param: torch.Tensor) -> str:
         return self._param_to_name.get(id(param), "")
 
@@ -480,6 +497,37 @@ class MuonFSDP(Muon):
         for name, param in param_name_mapping.items():
             self._param_to_name[id(param)] = name
 
+    @staticmethod
+    def _normalize_create_magma_kwargs(magma_kwargs: dict[str, Any] | None) -> dict[str, Any] | None:
+        if magma_kwargs is None:
+            return None
+
+        config = dict(magma_kwargs)
+        supported_keys = {"mode", "survival_prob", "tau", "ema_beta", "seed"}
+        unknown_keys = set(config).difference(supported_keys)
+        if unknown_keys:
+            unknown_str = ", ".join(sorted(unknown_keys))
+            raise ValueError(f"Unsupported magma_kwargs keys: {unknown_str}.")
+
+        reg_mask_mode = config.get("mode")
+        if reg_mask_mode not in (None, "magma", "skipupdate"):
+            raise ValueError(f"Invalid magma mode: {reg_mask_mode}. Expected one of: None, magma, skipupdate.")
+        if reg_mask_mode is None and any(key in config for key in ("survival_prob", "tau", "ema_beta", "seed")):
+            raise ValueError("magma_kwargs['mode'] is None, but mask hyperparameters are provided.")
+
+        normalized = {"reg_mask_mode": reg_mask_mode}
+        if "survival_prob" in config:
+            normalized["reg_mask_survival_prob"] = float(config["survival_prob"])
+        if "tau" in config:
+            normalized["reg_mask_tau"] = float(config["tau"])
+        if "ema_beta" in config:
+            normalized["reg_mask_ema_beta"] = float(config["ema_beta"])
+        if "seed" in config:
+            seed = config["seed"]
+            normalized["reg_mask_seed"] = None if seed is None else int(seed)
+        return normalized
+
+    # ------------------- Instantiation ------------------- #
     @classmethod
     @function_config_to_basic_types
     def create_muon_optimizer(
@@ -487,15 +535,106 @@ class MuonFSDP(Muon):
         named_parameters: Iterable[tuple[str, torch.nn.Parameter]] | dict[str, torch.nn.Parameter],
         ignored_keys_for_muon: tuple[str, ...] | list[str] = (),
         oned_param_algo: str = "lion",
+        magma_kwargs: dict[str, Any] | None = None,
         **kwargs,
-    ):
-        named_parameters_items = cls._normalize_named_parameters(named_parameters)
+    ) -> "MuonFSDP":
+        """
+        Build a MuonFSDP optimizer from named parameters, with optional inline Magma/SkipUpdate masking.
 
+        This helper splits parameters into:
+        - Muon group: trainable parameters with ndim >= 2 (except ignored patterns).
+        - 1D fallback group: trainable parameters with ndim < 2, or ignored by regex.
+
+        Parameters
+        ----------
+        named_parameters : Iterable[tuple[str, torch.nn.Parameter]] | dict[str, torch.nn.Parameter]
+            Model named parameters from ``model.named_parameters()`` or an equivalent dict.
+        ignored_keys_for_muon : tuple[str, ...] | list[str], default=()
+            Regex patterns. Matched 2D+ parameters are moved to the 1D fallback group.
+        oned_param_algo : str, default="lion"
+            Algorithm for the fallback group. Expected values are ``"lion"`` or ``"adamw"``.
+        magma_kwargs : dict[str, Any] | None, default=None
+            Optional inline masking configuration.
+            Supported keys:
+            - ``mode``: one of ``None``, ``"magma"``, ``"skipupdate"``.
+            - ``survival_prob`` -> ``reg_mask_survival_prob``
+            - ``tau`` -> ``reg_mask_tau``
+            - ``ema_beta`` -> ``reg_mask_ema_beta``
+            - ``seed`` -> ``reg_mask_seed``
+            When ``mode`` is ``None``, the other keys must not be provided.
+        **kwargs
+            Remaining kwargs forwarded to ``MuonFSDP(...)`` (for example ``lr``, ``muon_steps``,
+            ``muon_params_defaults``, ``oned_params_defaults``, ``enable_qk_clip``, etc.).
+
+        Returns
+        -------
+        MuonFSDP
+            Always returns a ``MuonFSDP`` instance.
+
+        Raises
+        ------
+        ValueError
+            If ``mode`` is invalid, or if ``magma_kwargs`` contains unsupported keys.
+
+        Examples
+        --------
+        Plain MuonFSDP:
+        ```python
+        optimizer = MuonFSDP.create_muon_optimizer(
+            model.named_parameters(),
+            ignored_keys_for_muon=("head",),
+            lr=1e-3,
+            muon_steps=5,
+        )
+        ```
+
+        MuonFSDP with inline Magma masking:
+        ```python
+        optimizer = MuonFSDP.create_muon_optimizer(
+            model.named_parameters(),
+            magma_kwargs={
+                "mode": "magma",
+                "survival_prob": 0.5,
+                "tau": 2.0,
+                "ema_beta": 0.9,
+                "seed": 0,
+            },
+            lr=1e-3,
+        )
+        ```
+
+        MuonFSDP with inline SkipUpdate masking:
+        ```python
+        optimizer = MuonFSDP.create_muon_optimizer(
+            model.named_parameters(),
+            magma_kwargs={"mode": "skipupdate", "survival_prob": 0.5, "seed": 123},
+            lr=1e-3,
+        )
+        ```
+        """
+        named_parameters_items = cls._normalize_named_parameters(named_parameters)
+        muon_params_defaults = dict(kwargs.pop("muon_params_defaults", {}) or {})
+        oned_params_defaults = dict(kwargs.pop("oned_params_defaults", {}) or {})
+        normalized_magma_kwargs = cls._normalize_create_magma_kwargs(magma_kwargs)
+        if "reg_mask_mode" in kwargs or "magma_wrap_kwargs" in kwargs:
+            raise ValueError(
+                "Deprecated args `reg_mask_mode` / `magma_wrap_kwargs` are not supported. "
+                "Please use `magma_kwargs={'mode': ..., ...}`."
+            )
+
+        # Muon 2d and 1d params
+        kwargs["muon_params_defaults"] = muon_params_defaults
+        kwargs["oned_params_defaults"] = oned_params_defaults
+
+        # Clear out the 2d and 1d params
         muon_params_g, oned_params_g = cls.clear_muon_adamw_params(
             named_parameters_items, ignored_keys_for_muon, oned_param_algo
         )
-        optimizer = cls(params=(muon_params_g, oned_params_g), **kwargs)
+
+        # Instantiate the optimizer
+        optimizer = cls(params=(muon_params_g, oned_params_g), magma_kwargs=normalized_magma_kwargs, **kwargs)
         optimizer.register_attention_params({name: param for name, param in named_parameters_items})
+
         return optimizer
 
     def __repr__(self) -> str:
