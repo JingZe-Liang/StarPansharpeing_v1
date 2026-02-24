@@ -17,16 +17,13 @@ from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torchmetrics.aggregation import MeanMetric
-from torchmetrics.classification import (
-    Accuracy,
-    F1Score,
-    MultilabelAccuracy,
-    MultilabelAveragePrecision,
-    MultilabelF1Score,
-)
-from torchmetrics.functional.classification import multilabel_average_precision, multilabel_f1_score
 from tqdm.auto import tqdm
 
+from src.stage2.classification.metrics.basic import (
+    MulticlassMetrics,
+    MultilabelMetrics,
+    TreeSatMultilabelMetrics,
+)
 from src.utilities.config_utils import to_object as to_cont
 from src.utilities.logging import dict_round_to_list_str, log_any_into_writter, set_logger_file
 from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync
@@ -36,6 +33,7 @@ from src.utilities.train_utils.state import StepsCounter, dict_tensor_sync
 class ClassificationOutput:
     loss: Tensor
     logits: Tensor
+    label: Tensor | None = None
     log_losses: dict[str, Tensor] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -291,41 +289,32 @@ class HyperClassificationTrainer:
         return nn.CrossEntropyLoss(weight=weight, label_smoothing=label_smoothing)
 
     def init_metrics(self) -> None:
+        self.is_treesat_metric = str(getattr(self.dataset_cfg, "dataset_name", "")).startswith("TreeSatAI_TS")
         if self.metric_task == "multilabel":
             num_labels = int(getattr(self.metric_cfg, "num_labels", self.metric_cfg.num_classes))
             self.multilabel_num_labels = num_labels
             self.map_average = str(getattr(self.metric_cfg, "map_average", "macro"))
-            self.acc_metric: Any = MultilabelAccuracy(
-                num_labels=num_labels,
-                threshold=self.multilabel_threshold,
-                average="micro",
-            ).to(self.device)
-            self.f1_metric: Any = MultilabelF1Score(
-                num_labels=num_labels,
-                threshold=self.multilabel_threshold,
-                average="macro",
-            ).to(self.device)
             if self.map_average not in {"micro", "macro", "weighted", "none"}:
                 raise ValueError(f"Unsupported metric.map_average={self.map_average}")
-            self.map_metric: Any = MultilabelAveragePrecision(
-                num_labels=num_labels,
-                average=cast(Literal["micro", "macro", "weighted", "none"], self.map_average),
-            ).to(self.device)
-            self.acc_metric_top5: Any = None
+            if self.is_treesat_metric:
+                self.metric_impl = TreeSatMultilabelMetrics(
+                    num_labels=num_labels,
+                    threshold=self.multilabel_threshold,
+                    map_average=cast(Literal["micro", "macro", "weighted", "none"], self.map_average),
+                    device=self.device,
+                )
+            else:
+                self.metric_impl = MultilabelMetrics(
+                    num_labels=num_labels,
+                    threshold=self.multilabel_threshold,
+                    map_average=cast(Literal["micro", "macro", "weighted", "none"], self.map_average),
+                    device=self.device,
+                )
             return
 
         num_classes = self.metric_cfg.num_classes
         top_k = getattr(self.metric_cfg, "top_k", 1)
-        self.acc_metric: Any = Accuracy(task="multiclass", num_classes=num_classes, top_k=top_k, average="micro").to(
-            self.device
-        )
-        self.f1_metric: Any = F1Score(task="multiclass", num_classes=num_classes, top_k=top_k, average="macro").to(
-            self.device
-        )
-        self.acc_metric_top5: Any = Accuracy(task="multiclass", num_classes=num_classes, top_k=5, average="micro").to(
-            self.device
-        )
-        self.map_metric: Any = None
+        self.metric_impl = MulticlassMetrics(num_classes=num_classes, top_k=top_k, device=self.device)
         self.multilabel_num_labels = 0
         self.map_average = "macro"
 
@@ -531,6 +520,24 @@ class HyperClassificationTrainer:
             return metric
         return metric.mean()
 
+    def _build_train_batch_info(self, logits: Tensor, label: Tensor, max_items: int = 4) -> str:
+        if self.metric_task != "multilabel":
+            return ""
+
+        eval_logits = logits.detach()
+        eval_target = label.detach().int()
+        # if self.is_treesat_metric:
+        #     eval_logits = eval_logits[:, 1:-1]
+        #     eval_target = eval_target[:, 1:-1]
+        pred_multi_hot = torch.sigmoid(eval_logits) >= self.multilabel_threshold
+        n = min(max_items, int(pred_multi_hot.shape[0]))
+        pairs: list[str] = []
+        for i in range(n):
+            pred_i = torch.nonzero(pred_multi_hot[i], as_tuple=False).squeeze(-1).tolist()
+            gt_i = torch.nonzero(eval_target[i] > 0, as_tuple=False).squeeze(-1).tolist()
+            pairs.append(f"{pred_i}/{gt_i}")
+        return f"shape logits={tuple(eval_logits.shape)}, label={tuple(eval_target.shape)} | pred_pos/gt_pos={pairs}"
+
     def train_step(self, batch: Any) -> ClassificationOutput:
         with self.accelerator.accumulate(self.model):
             image, label = self._parse_batch(batch)
@@ -538,35 +545,9 @@ class HyperClassificationTrainer:
             loss = self.loss_fn(logits, label)
             self._optimize_step(loss)
 
-        if self.metric_task == "multilabel":
-            probs = torch.sigmoid(logits)
-            pred = (probs >= self.multilabel_threshold).float()
-            acc = (pred == label).float().mean()
-            target = label.int()
-            train_f1 = multilabel_f1_score(
-                probs.detach(),
-                target,
-                num_labels=self.multilabel_num_labels,
-                threshold=self.multilabel_threshold,
-                average="macro",
-            )
-            train_map = multilabel_average_precision(
-                probs.detach(),
-                target,
-                num_labels=self.multilabel_num_labels,
-                average=cast(Literal["micro", "macro", "weighted", "none"], self.map_average),
-            )
-            log_losses = {
-                "cls_loss": loss.detach(),
-                "acc": acc.detach(),
-                "mf1": self._reduce_metric_tensor(train_f1).detach(),
-                "map": self._reduce_metric_tensor(train_map).detach(),
-            }
-        else:
-            pred = torch.argmax(logits, dim=1)
-            acc = (pred == label).float().mean()
-            log_losses = {"cls_loss": loss.detach(), "acc": acc.detach()}
-        return ClassificationOutput(loss=loss, logits=logits, log_losses=log_losses)
+        metric_logs = self.metric_impl.compute_train_metrics(logits, label)
+        log_losses = {"cls_loss": loss.detach(), **metric_logs}
+        return ClassificationOutput(loss=loss, logits=logits, label=label.detach(), log_losses=log_losses)
 
     def format_log(self, log_loss: dict[str, Tensor], sync: bool = False) -> str:
         if sync:
@@ -610,12 +591,7 @@ class HyperClassificationTrainer:
     def val_loop(self) -> None:
         self.model.eval()
         loss_metric = MeanMetric().to(device=self.device)
-        self.acc_metric.reset()
-        self.f1_metric.reset()
-        if self.metric_task == "multiclass" and self.acc_metric_top5 is not None:
-            self.acc_metric_top5.reset()
-        if self.metric_task == "multilabel" and self.map_metric is not None:
-            self.map_metric.reset()
+        self.metric_impl.reset()
 
         val_iter = self.get_val_loader_iter()
         val_total: int | None = None
@@ -639,30 +615,12 @@ class HyperClassificationTrainer:
             loss, logits, label = self.val_step(batch)
             gathered_logits = self.accelerator.gather_for_metrics(logits)
             gathered_label = self.accelerator.gather_for_metrics(label)
-            if self.metric_task == "multilabel":
-                probs = torch.sigmoid(gathered_logits)
-                target = gathered_label.int()
-                self.acc_metric.update(probs, target)
-                self.f1_metric.update(probs, target)
-                if self.map_metric is not None:
-                    self.map_metric.update(probs, target)
-            else:
-                self.acc_metric.update(gathered_logits, gathered_label)
-                self.f1_metric.update(gathered_logits, gathered_label)
-                if self.acc_metric_top5 is not None:
-                    self.acc_metric_top5.update(gathered_logits, gathered_label)
+            self.metric_impl.update(gathered_logits, gathered_label)
             loss_metric.update(loss.detach())  # type: ignore[arg-type]
             self.step_train_state("val")
 
-        metrics: dict[str, Any] = {
-            "val_acc": self.acc_metric.compute(),  # type: ignore[call-arg]
-            "val_f1": self.f1_metric.compute(),  # type: ignore[call-arg]
-            "val_loss": loss_metric.compute(),  # type: ignore[call-arg]
-        }
-        if self.metric_task == "multiclass" and self.acc_metric_top5 is not None:
-            metrics["val_acc_top5"] = self.acc_metric_top5.compute()  # type: ignore[call-arg]
-        if self.metric_task == "multilabel" and self.map_metric is not None:
-            metrics["val_map"] = self.map_metric.compute()  # type: ignore[call-arg]
+        metrics: dict[str, Any] = dict(cast(Any, self.metric_impl).compute())
+        metrics["val_loss"] = loss_metric.compute()  # type: ignore[call-arg]
 
         if self.accelerator.is_main_process:
             metric_str = " - ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
@@ -680,11 +638,16 @@ class HyperClassificationTrainer:
 
             if self.global_step % self.train_cfg.log.log_every == 0:
                 _log_losses = self.format_log(train_out.log_losses)
+                _batch_info = ""
+                if train_out.label is not None:
+                    _batch_info = self._build_train_batch_info(train_out.logits, train_out.label)
                 self.log_msg(
                     f"[Train State]: lr {self.optim.param_groups[0]['lr']:1.4e} | "
                     f"[Step]: {self.global_step}/{self.train_cfg.max_steps}"
                 )
                 self.log_msg(f"[Train CLS]: {_log_losses}")
+                if _batch_info:
+                    self.log_msg(f"[Train Batch]: {_batch_info}")
                 self.tenb_log_any("metric", train_out.log_losses, self.global_step)
 
             if self.global_step % self.val_cfg.val_duration == 0:
@@ -739,10 +702,11 @@ class HyperClassificationTrainer:
         self.train_loop()
 
 
-_key = "cosmos_treesatai_ts_linear"
+_key = "cosmos_ucmerced_hybrid_linear"
 _configs_dict = {
     "cosmos_ucmerced_linear": "cosmos_ucmerced_linear",
     "cosmos_treesatai_ts_linear": "cosmos_treesatai_ts_linear",
+    "omnisat_treesatai_mm": "omnisat_treesatai_mm",
     "cosmos_eurosat_linear": "cosmos_eurosat_linear",
     "dinov3_ucmerced_linear": "dinov3_ucmerced_linear",
     "cosmos_ucmerced_hybrid_linear": "cosmos_ucmerced_hybrid_linear",

@@ -76,7 +76,7 @@
 
 [submodule "src/utilities/optim/dion"]
 	path = src/utilities/optim/dion
-	url = git@github.com:microsoft/dion.git
+	url = https://github.com/294coder/dion.git
 
 [submodule "src/stage2/detections/GT-HAD"]
 	path = src/stage2/detections/GT-HAD
@@ -239,3 +239,6 @@
 [submodule "src/stage2/generative/GLIGEN"]
 	path = src/stage2/generative/GLIGEN
 	url = https://github.com/gligen/GLIGEN.git
+[submodule "src/stage2/SSL_third_party/OmniSat"]
+	path = src/stage2/SSL_third_party/OmniSat
+	url = https://github.com/gastruc/OmniSat.git

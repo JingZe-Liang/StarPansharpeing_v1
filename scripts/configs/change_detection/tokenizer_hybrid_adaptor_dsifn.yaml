@@ -16,16 +16,14 @@ ema:
   _target_: ema_pytorch.EMA
   _partial_: true
   beta: 0.999
-  update_after_step: 1000
+  update_after_step: 0
   update_every: 1
-  allow_different_devices: true
-  lazy_init_ema: true
 
 segment_loss:
   _target_: src.stage2.segmentation.loss.seg_loss.HyperSegmentationLoss
   ignore_index: 255
-  ce_weight: [1.0, 10.0]
-  loss_weights: [1.0, 3.0, 0.3]
+  ce_weight: null #[1.0, 1.0]
+  loss_weights: [0.0, 1.0, 0.0]
   mode: multiclass
 
 metric:
@@ -41,7 +39,7 @@ train:
   act_checkpoint: true
   val_slide_window_kwargs:
     patch_size: 128
-    stride: 128
+    stride: 64
 
   use_single_img_indexing: false
   patches_per_image:
@@ -49,7 +47,7 @@ train:
 
   proj_dir: runs/stage2_CD_wrapper/
   finetune_strategy: finetune_all
-  max_grad_norm: 3.0
+  max_grad_norm: 1.0
 
   track_metrics_duration: -1
   track_metrics_after: 2000
@@ -59,7 +57,7 @@ train:
   is_neg_1_1: true
 
   resume_path: #runs/stage2_CD_wrapper/2026-02-07_18-15-14_DSIFN_tokenizer_hybrid_adaptor/checkpoints/checkpoint_11
-  ema_load_path: runs/stage2_CD_wrapper/2026-02-07_20-48-06_DSIFN_tokenizer_hybrid_adaptor/ema
+  ema_load_path: runs/stage2_CD_wrapper/2026-02-24_01-58-37_DSIFN_tokenizer_hybrid_adaptor/ema
 
   segment_optim:
     _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
@@ -68,10 +66,10 @@ train:
     oned_param_algo: lion
     use_triton: true
     muon_params_defaults:
-      lr: 4.0e-4
-      weight_decay: 0.0
+      lr: 1.5e-4
+      weight_decay: 0.1
     oned_params_defaults:
-      lr: 4.0e-4
+      lr: 1.0e-4
       weight_decay: 0.0
 
   segment_sched:

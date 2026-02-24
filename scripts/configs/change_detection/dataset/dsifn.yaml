@@ -1,9 +1,8 @@
-train_bs: 8
+train_bs: 4
 val_bs: 4
 
 data_type: null
 label_mode: seg
-patch_size: 128
 micro_batch_size: 12
 dataset_name: DSIFN
 
@@ -17,7 +16,7 @@ train:
   _target_: src.stage2.change_detection.data.DSIFN.create_dsifn_change_detection_dataloader
   data_root: data/Downstreams/ChangeDetection-DSIFN
   split: train
-  mask_dir: mask_256
+  mask_dir: mask
   mask_subdir: null
   batch_size: ${dataset.train_bs}
   shuffle: true
@@ -25,7 +24,8 @@ train:
   transform: default
   normalize: true
   img_to_neg1_1: true
-  resize_to_mask: true
+  resize_to_mask: false
+  resize_to: 512
   return_name: false
   pin_memory: true
   drop_last: false
@@ -34,7 +34,7 @@ val:
   _target_: src.stage2.change_detection.data.DSIFN.create_dsifn_change_detection_dataloader
   data_root: data/Downstreams/ChangeDetection-DSIFN
   split: test
-  mask_dir: mask_256
+  mask_dir: mask
   mask_subdir: null
   batch_size: ${dataset.val_bs}
   shuffle: true
@@ -42,7 +42,8 @@ val:
   transform: null
   normalize: true
   img_to_neg1_1: true
-  resize_to_mask: true
+  resize_to_mask: false
+  resize_to: 512
   return_name: false
   pin_memory: true
   drop_last: false

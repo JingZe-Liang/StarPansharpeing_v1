@@ -4,15 +4,18 @@ import datetime as dt
 import json
 import re
 from collections.abc import Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 import h5py
 import tifffile
+from omegaconf import OmegaConf
 
 from src.stage2.classification.data.builder import create_dataloader as build_dataloader
 
@@ -93,6 +96,20 @@ def _normalize_max_t(max_t: int | None, name: str) -> int | None:
     return max_t
 
 
+def _normalize_positive_int(value: int, name: str) -> int:
+    value = int(value)
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0, got {value}")
+    return value
+
+
+def _normalize_label_area_threshold(value: float) -> float:
+    value = float(value)
+    if value < 0.0 or value > 1.0:
+        raise ValueError(f"label_area_threshold must be in [0, 1], got {value}")
+    return value
+
+
 def _truncate_temporal_tensor(tensor: Tensor, max_t: int | None) -> Tensor:
     if max_t is None or int(tensor.shape[0]) <= max_t:
         return tensor
@@ -109,6 +126,53 @@ def _replace_nan_with_zero(tensor: Tensor) -> Tensor:
     if torch.isnan(tensor).any():
         return torch.nan_to_num(tensor, nan=0.0)
     return tensor
+
+
+def _replace_nans_with_spatial_mean(tensor: Tensor) -> Tensor:
+    if tensor.ndim != 4:
+        raise ValueError(f"Expected S1 tensor shape (T,C,H,W), got {tuple(tensor.shape)}")
+    image_means = torch.nanmean(tensor, dim=(2, 3), keepdim=True)
+    image_means = torch.nan_to_num(image_means, nan=0.0)
+    nan_mask = torch.isnan(tensor)
+    if nan_mask.any():
+        tensor = tensor.clone()
+        tensor[nan_mask] = image_means.expand_as(tensor)[nan_mask]
+    return tensor
+
+
+def _select_temporal_indices(
+    length: int,
+    sample_cap: int,
+    max_t: int | None,
+    mode: Literal["official_random_cap_then_max_t", "truncate_only"],
+) -> Tensor:
+    if length <= 0:
+        return torch.zeros((0,), dtype=torch.long)
+    if mode == "official_random_cap_then_max_t":
+        if length > sample_cap:
+            indices = torch.randperm(length)[:sample_cap]
+        else:
+            indices = torch.arange(length, dtype=torch.long)
+    elif mode == "truncate_only":
+        indices = torch.arange(length, dtype=torch.long)
+    else:
+        raise ValueError(f"Unsupported temporal_sampling_mode={mode}")
+    if max_t is not None:
+        indices = indices[:max_t]
+    return indices
+
+
+def _select_tensor_by_indices(tensor: Tensor, indices: Tensor) -> Tensor:
+    if indices.numel() == 0:
+        return tensor[:0]
+    return tensor.index_select(0, indices.to(device=tensor.device))
+
+
+def _select_list_by_indices(values: list[str], indices: Tensor) -> list[str]:
+    output: list[str] = []
+    for index in indices.tolist():
+        output.append(values[int(index)])
+    return output
 
 
 def _resize_timeseries(
@@ -164,7 +228,10 @@ def _pad_sequence_tensors(
     return output, valid
 
 
-def treesatai_timeseries_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+def treesatai_timeseries_collate_fn(
+    batch: list[dict[str, Any]],
+    emit_valid_mask: bool = True,
+) -> dict[str, Any]:
     collated: dict[str, Any] = {}
     if not batch:
         return collated
@@ -175,7 +242,8 @@ def treesatai_timeseries_collate_fn(batch: list[dict[str, Any]]) -> dict[str, An
         if any(tensor.ndim >= 1 and tensor.shape[0] != tensors[0].shape[0] for tensor in tensors):
             padded, valid = _pad_sequence_tensors(tensors, pad_value=0.0)
             collated[key] = padded
-            collated[f"{key}_valid"] = valid
+            if emit_valid_mask:
+                collated[f"{key}_valid"] = valid
         else:
             collated[key] = torch.stack(tensors, dim=0)
 
@@ -210,6 +278,13 @@ class TreeSatAITimeSeriesDataset(Dataset[dict[str, Any]]):
         s2_mask_interp_mode: Literal["nearest", "bilinear"] = "nearest",
         s2_to_neg_1_1: bool = False,
         strict_files: bool = True,
+        label_area_threshold: float = 0.07,
+        temporal_sample_cap: int = 50,
+        temporal_sampling_mode: Literal["official_random_cap_then_max_t", "truncate_only"] = (
+            "official_random_cap_then_max_t"
+        ),
+        emit_valid_mask: bool = False,
+        s1_nan_fill_mode: Literal["spatial_mean", "zero"] = "spatial_mean",
     ) -> None:
         self.root = Path(root)
         self.split = split
@@ -225,6 +300,11 @@ class TreeSatAITimeSeriesDataset(Dataset[dict[str, Any]]):
         self.s2_mask_interp_mode = s2_mask_interp_mode
         self.s2_to_neg_1_1 = s2_to_neg_1_1
         self.strict_files = strict_files
+        self.label_area_threshold = _normalize_label_area_threshold(label_area_threshold)
+        self.temporal_sample_cap = _normalize_positive_int(temporal_sample_cap, "temporal_sample_cap")
+        self.temporal_sampling_mode = temporal_sampling_mode
+        self.emit_valid_mask = bool(emit_valid_mask)
+        self.s1_nan_fill_mode = s1_nan_fill_mode
 
         if not self.sensors:
             raise ValueError("sensors must not be empty.")
@@ -233,6 +313,10 @@ class TreeSatAITimeSeriesDataset(Dataset[dict[str, Any]]):
         invalid_sensors = set(self.sensors) - valid_sensors
         if invalid_sensors:
             raise ValueError(f"Unsupported sensors: {sorted(invalid_sensors)}")
+        if self.temporal_sampling_mode not in {"official_random_cap_then_max_t", "truncate_only"}:
+            raise ValueError(f"Unsupported temporal_sampling_mode={self.temporal_sampling_mode}")
+        if self.s1_nan_fill_mode not in {"spatial_mean", "zero"}:
+            raise ValueError(f"Unsupported s1_nan_fill_mode={self.s1_nan_fill_mode}")
 
         self.split_files = self._read_split_list()
         self.h5_lookup = self._build_h5_lookup()
@@ -294,10 +378,17 @@ class TreeSatAITimeSeriesDataset(Dataset[dict[str, Any]]):
 
         output: dict[str, Tensor] = {}
         if self.label_mode in {"multi_hot", "both"}:
-            output["label"] = (proportion > 0).to(torch.float32)
+            output["label"] = (proportion > self.label_area_threshold).to(torch.float32)
         if self.label_mode in {"proportion", "both"}:
             output["label_proportion"] = proportion
         return output
+
+    def _maybe_fill_s1_nan(self, tensor: Tensor) -> Tensor:
+        if self.s1_nan_fill_mode == "spatial_mean":
+            return _replace_nans_with_spatial_mean(tensor)
+        if self.s1_nan_fill_mode == "zero":
+            return _replace_nan_with_zero(tensor)
+        raise ValueError(f"Unsupported s1_nan_fill_mode={self.s1_nan_fill_mode}")
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         """Read one TreeSatAI-TS sample.
@@ -362,20 +453,34 @@ class TreeSatAITimeSeriesDataset(Dataset[dict[str, Any]]):
         with h5py.File(h5_path, "r") as file:
             if "s1_asc" in self.sensors:
                 s1_asc = torch.from_numpy(file["sen-1-asc-data"][:]).to(torch.float32)
-                s1_asc = _replace_nan_with_zero(s1_asc)
-                s1_asc = _truncate_temporal_tensor(s1_asc, self.max_t_s1)
+                s1_asc = self._maybe_fill_s1_nan(s1_asc)
+                products_asc = _decode_string_array(file["sen-1-asc-products"][:])
+                s1_asc_indices = _select_temporal_indices(
+                    length=int(s1_asc.shape[0]),
+                    sample_cap=self.temporal_sample_cap,
+                    max_t=self.max_t_s1,
+                    mode=self.temporal_sampling_mode,
+                )
+                s1_asc = _select_tensor_by_indices(s1_asc, s1_asc_indices)
+                products_asc = _select_list_by_indices(products_asc, s1_asc_indices)
                 s1_asc = _resize_timeseries(s1_asc, target_hw=self.s1_hw, mode=self.image_interp_mode)
-                products_asc = _truncate_list(_decode_string_array(file["sen-1-asc-products"][:]), self.max_t_s1)
                 output["image_s1_asc"] = _scale_tensor(s1_asc, mode=self.scale_mode)
                 output["products_s1_asc"] = products_asc
                 output["doy_s1_asc"] = torch.tensor([_extract_day_of_year(x) for x in products_asc], dtype=torch.long)
 
             if "s1_des" in self.sensors:
                 s1_des = torch.from_numpy(file["sen-1-des-data"][:]).to(torch.float32)
-                s1_des = _replace_nan_with_zero(s1_des)
-                s1_des = _truncate_temporal_tensor(s1_des, self.max_t_s1)
+                s1_des = self._maybe_fill_s1_nan(s1_des)
+                products_des = _decode_string_array(file["sen-1-des-products"][:])
+                s1_des_indices = _select_temporal_indices(
+                    length=int(s1_des.shape[0]),
+                    sample_cap=self.temporal_sample_cap,
+                    max_t=self.max_t_s1,
+                    mode=self.temporal_sampling_mode,
+                )
+                s1_des = _select_tensor_by_indices(s1_des, s1_des_indices)
+                products_des = _select_list_by_indices(products_des, s1_des_indices)
                 s1_des = _resize_timeseries(s1_des, target_hw=self.s1_hw, mode=self.image_interp_mode)
-                products_des = _truncate_list(_decode_string_array(file["sen-1-des-products"][:]), self.max_t_s1)
                 output["image_s1_des"] = _scale_tensor(s1_des, mode=self.scale_mode)
                 output["products_s1_des"] = products_des
                 output["doy_s1_des"] = torch.tensor([_extract_day_of_year(x) for x in products_des], dtype=torch.long)
@@ -383,11 +488,18 @@ class TreeSatAITimeSeriesDataset(Dataset[dict[str, Any]]):
             if "s2" in self.sensors:
                 s2 = torch.from_numpy(file["sen-2-data"][:]).to(torch.float32)
                 s2_masks = torch.from_numpy(file["sen-2-masks"][:]).to(torch.float32)
-                s2 = _truncate_temporal_tensor(s2, self.max_t_s2)
-                s2_masks = _truncate_temporal_tensor(s2_masks, self.max_t_s2)
+                products_s2 = _decode_string_array(file["sen-2-products"][:])
+                s2_indices = _select_temporal_indices(
+                    length=int(s2.shape[0]),
+                    sample_cap=self.temporal_sample_cap,
+                    max_t=self.max_t_s2,
+                    mode=self.temporal_sampling_mode,
+                )
+                s2 = _select_tensor_by_indices(s2, s2_indices)
+                s2_masks = _select_tensor_by_indices(s2_masks, s2_indices)
+                products_s2 = _select_list_by_indices(products_s2, s2_indices)
                 s2 = _resize_timeseries(s2, target_hw=self.s2_hw, mode=self.image_interp_mode)
                 s2_masks = _resize_timeseries(s2_masks, target_hw=self.s2_hw, mode=self.s2_mask_interp_mode)
-                products_s2 = _truncate_list(_decode_string_array(file["sen-2-products"][:]), self.max_t_s2)
                 if self.s2_to_neg_1_1:
                     output["image_s2"] = _scale_to_neg_1_1_strict(s2)
                 else:
@@ -408,10 +520,192 @@ class TreeSatAITimeSeriesDataset(Dataset[dict[str, Any]]):
         dataset_kwargs = dataset_kwargs or {}
         loader_kwargs = loader_kwargs or {}
         dataset = cls(**dataset_kwargs)
-        collate_fn = treesatai_timeseries_collate_fn if pad_time_series else None
+        collate_fn = (
+            partial(treesatai_timeseries_collate_fn, emit_valid_mask=dataset.emit_valid_mask)
+            if pad_time_series
+            else None
+        )
         _, dataloader = build_dataloader(
             dataset=dataset,
             loader_kwargs=loader_kwargs,
             collate_fn=collate_fn,
         )
         return dataset, dataloader
+
+
+def _print_batch_debug_info(batch: dict[str, Any]) -> None:
+    print(f"batch keys: {list(batch.keys())}")
+    for key, value in batch.items():
+        if isinstance(value, Tensor):
+            print(f"{key}: shape={tuple(value.shape)}, dtype={value.dtype}")
+        elif isinstance(value, list):
+            print(f"{key}: list(len)={len(value)}")
+        else:
+            print(f"{key}: type={type(value)}")
+    label = batch.get("label", None)
+    if isinstance(label, Tensor):
+        print(f"label max: {float(label.max().item())}")
+    else:
+        print("label not found in batch.")
+
+
+def _to_display_rgb(image_chw: Tensor, rgb_indices: tuple[int, int, int] | None = None) -> Tensor:
+    if image_chw.ndim != 3:
+        raise ValueError(f"Expected CHW image, got {tuple(image_chw.shape)}")
+    channels = int(image_chw.shape[0])
+    if channels == 1:
+        rgb = image_chw.repeat(3, 1, 1)
+    elif channels >= 3:
+        if rgb_indices is not None and max(rgb_indices) < channels:
+            rgb = image_chw[list(rgb_indices)]
+        else:
+            rgb = image_chw[:3]
+    else:
+        pad = image_chw.new_zeros((3 - channels, *image_chw.shape[1:]))
+        rgb = torch.cat([image_chw, pad], dim=0)
+
+    rgb = rgb.to(torch.float32)
+    min_v = rgb.amin()
+    max_v = rgb.amax()
+    rgb = (rgb - min_v) / (max_v - min_v).clamp_min(1e-6)
+    return rgb.permute(1, 2, 0).cpu()
+
+
+def _get_valid_frame_indices(valid_mask: Tensor | None, sample_index: int, t: int) -> list[int]:
+    if valid_mask is None:
+        return list(range(t))
+    if valid_mask.ndim != 2:
+        raise ValueError(f"Expected valid mask shape [B,T], got {tuple(valid_mask.shape)}")
+    sample_valid = valid_mask[sample_index]
+    indices = torch.where(sample_valid)[0].tolist()
+    if not indices:
+        return [0]
+    return [int(idx) for idx in indices]
+
+
+def _label_indices_as_int_list(labels: Tensor, sample_index: int) -> list[int]:
+    sample_label = labels[sample_index]
+    if sample_label.ndim != 1:
+        raise ValueError(f"Expected label shape [C], got {tuple(sample_label.shape)}")
+    positive = torch.where(sample_label > 0.5)[0].tolist()
+    return [int(idx) for idx in positive]
+
+
+def _label_text(labels: Tensor, sample_index: int) -> str:
+    label_ints = _label_indices_as_int_list(labels, sample_index)
+    if not label_ints:
+        return "[]"
+    return "[" + ",".join(str(idx) for idx in label_ints) + "]"
+
+
+def plot_batch_modalities(batch: dict[str, Any], save_path: str | None = None) -> None:
+    labels = batch.get("label", None)
+    if not isinstance(labels, Tensor):
+        raise ValueError("batch must contain tensor key 'label'.")
+    bsz = int(labels.shape[0])
+    if bsz <= 0:
+        raise ValueError("Empty batch cannot be plotted.")
+
+    modality_keys = [key for key in ("image_aerial", "image_s1_asc", "image_s1_des", "image_s2") if key in batch]
+    if not modality_keys:
+        raise ValueError("No supported image modality key found in batch.")
+
+    frame_indices_map: dict[tuple[int, str], list[int]] = {}
+    max_cols = 1
+    for row in range(bsz):
+        for image_key in modality_keys:
+            value = batch[image_key]
+            if not isinstance(value, Tensor):
+                continue
+            if value.ndim == 4:
+                indices = [0]
+            elif value.ndim == 5:
+                valid_key = f"{image_key}_valid"
+                valid_value = batch.get(valid_key, None)
+                valid_mask = valid_value if isinstance(valid_value, Tensor) else None
+                indices = _get_valid_frame_indices(valid_mask, row, int(value.shape[1]))
+            else:
+                continue
+            frame_indices_map[(row, image_key)] = indices
+            max_cols = max(max_cols, len(indices))
+
+    rows = bsz * len(modality_keys)
+    cols = max_cols
+    fig_w = max(2.2 * cols, 6)
+    fig_h = max(2.2 * rows, 4)
+    fig, axes = plt.subplots(rows, cols, figsize=(fig_w, fig_h), squeeze=False)
+
+    for sample_index in range(bsz):
+        cur_label_text = _label_text(labels, sample_index)
+        for modality_index, image_key in enumerate(modality_keys):
+            row_index = sample_index * len(modality_keys) + modality_index
+            image_tensor = batch.get(image_key, None)
+            if not isinstance(image_tensor, Tensor):
+                for col in range(cols):
+                    axes[row_index][col].axis("off")
+                continue
+
+            frame_indices = frame_indices_map.get((sample_index, image_key), [])
+            if not frame_indices:
+                for col in range(cols):
+                    axes[row_index][col].axis("off")
+                continue
+
+            for col in range(cols):
+                ax = axes[row_index][col]
+                if col >= len(frame_indices):
+                    ax.axis("off")
+                    continue
+                t_idx = frame_indices[col]
+                if image_tensor.ndim == 4:
+                    image_chw = image_tensor[sample_index]
+                elif image_tensor.ndim == 5:
+                    image_chw = image_tensor[sample_index, t_idx]
+                else:
+                    ax.axis("off")
+                    continue
+
+                if image_key == "image_s2":
+                    rgb = _to_display_rgb(image_chw, rgb_indices=(3, 2, 1))
+                else:
+                    rgb = _to_display_rgb(image_chw, rgb_indices=None)
+                ax.imshow(rgb.numpy())
+                ax.set_xticks([])
+                ax.set_yticks([])
+                if col == 0:
+                    ax.set_title(f"{image_key} | label={cur_label_text}", fontsize=8)
+
+    plt.tight_layout()
+    if save_path is not None:
+        plt.savefig(save_path, dpi=180, bbox_inches="tight")
+        print(f"Saved batch plot to: {save_path}")
+    else:
+        plt.show()
+    plt.close(fig)
+
+
+if __name__ == "__main__":
+    repo_root = Path(__file__).resolve().parents[4]
+    cfg_path = repo_root / "scripts/configs/classification/dataset/treesatai_ts.yaml"
+    cfg = OmegaConf.load(cfg_path)
+    train_cfg = cfg.train
+    raw_dataset_kwargs = OmegaConf.to_container(train_cfg.dataset_kwargs, resolve=True)
+    raw_loader_kwargs = OmegaConf.to_container(train_cfg.loader_kwargs, resolve=True)
+    pad_time_series = bool(train_cfg.pad_time_series)
+
+    if not isinstance(raw_dataset_kwargs, dict) or not isinstance(raw_loader_kwargs, dict):
+        raise ValueError("dataset_kwargs and loader_kwargs must be mapping objects.")
+    dataset_kwargs: dict[str, Any] = {str(key): value for key, value in raw_dataset_kwargs.items()}
+    loader_kwargs: dict[str, Any] = {str(key): value for key, value in raw_loader_kwargs.items()}
+
+    dataset, dataloader = TreeSatAITimeSeriesDataset.create_dataloader(
+        dataset_kwargs=dataset_kwargs,
+        loader_kwargs=loader_kwargs,
+        pad_time_series=pad_time_series,
+    )
+    print(f"dataset size: {len(dataset)}")
+    first_batch = next(iter(dataloader))
+    if not isinstance(first_batch, dict):
+        raise ValueError(f"Expected dict batch, got {type(first_batch)}")
+    _print_batch_debug_info(first_batch)
+    plot_batch_modalities(first_batch, save_path="treesatai_batch_debug.jpg")

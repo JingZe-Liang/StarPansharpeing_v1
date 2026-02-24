@@ -286,6 +286,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             logger.warning(
                 f"temp code for continue training that initialize the quant convs using trunc_norm_ with std=0.01"
             )
+        logger.success(f"Load pretrained ckpt at {uni_tokenizer_path}")
 
     @staticmethod
     def _interp_max_size_features(feats: list[Tensor]):
@@ -1492,6 +1493,6 @@ if __name__ == "__main__":
     """
     with logger.catch():
         test_model_forward_backward(
-            real_data="SAM270k", compute_mean_std=False, max_iters=1, save_pca_vis=True, pca_type="proj"
+            real_data="SAM270k", compute_mean_std=True, max_iters=100, save_pca_vis=False, pca_type="proj"
         )
         # test_forward_pca()

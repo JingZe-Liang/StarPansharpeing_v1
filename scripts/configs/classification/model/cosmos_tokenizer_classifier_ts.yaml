@@ -5,15 +5,26 @@ defaults:
 _target_: src.stage2.classification.model.CosmosTokenizerClassifierTS
 num_classes: ${dataset.consts.num_classes}
 tokenizer_pretrained_path: runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors
-freeze_tokenizer: ${train.freeze_tokenizer}
+freeze_tokenizer: true #${train.freeze_tokenizer}
 use_quantizer: false
-use_z: true
+use_z: false
+n_last_blocks: 4
 latent_proj_dim: null
 expected_in_chans: 512
 enable_input_proj: true
 max_frames_per_forward: 16
-modality_order: [aerial, s1_asc, s1_des, s2]
+modality_order: [aerial, s1_asc, s2]
 modality_fusion: concat
+fusion_dim: 512
+fusion_layers: 2
+fusion_heads: 8
+fusion_dropout: 0.1
+fusion_pool: cls
+ltae_d_model: 256
+ltae_heads: 16
+ltae_d_k: 8
+ltae_dropout: 0.1
+share_s1_ltae: true
 
 classifier:
   classifier_type: linear_probe

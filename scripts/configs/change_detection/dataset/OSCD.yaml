@@ -1,4 +1,4 @@
-train_bs: 3
+train_bs: 4
 val_bs: 1
 
 data_type: label_centrical
@@ -16,8 +16,8 @@ consts:
 train:
   _target_: src.stage2.change_detection.data.oscd_loader.create_oscd_loader
   wds_paths:
-    - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.npy.tar
-    - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.npy.tar
+    - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_train.tar
+    # - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.tar
   batch_size: ${dataset.train_bs}
   to_neg_1_1: true
   num_workers: 4
@@ -27,13 +27,13 @@ train:
   shuffle_size: 20
   pin_memory: true
   prefetch_factor: 6
-  random_flip_prob: 0.8
-  crop_size: 256
+  random_flip_prob: 0.5
+  crop_size: ${..patch_size}
 
 val:
   _target_: src.stage2.change_detection.data.oscd_loader.create_oscd_loader
   wds_paths:
-    - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.npy.tar
+    - data/Downstreams/ChangeDetection/OSCD/OSCD_13bands_test.tar
   batch_size: ${dataset.val_bs}
   to_neg_1_1: true
   num_workers: 2

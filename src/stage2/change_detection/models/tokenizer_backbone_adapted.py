@@ -24,6 +24,9 @@ from ...layers import DINOv3_Adapter, MbConvLNBlock
 from .adapter import DINOv3EncoderAdapter, UNetDecoder
 from .dinov3_adapted import LatentSpectralStage, MultiscaleMBConvSkipsStage
 
+
+logger = logger.bind(_name_="TokenizerAdaptedCDModel")
+
 TOKENIZER_INTERACTION_INDEXES = {
     "hybrid_tokenizer_b16": [3, 6, 8, 11],
 }
@@ -141,6 +144,8 @@ def _create_default_cfg():
     deep_supervision: false
     n_stages: 4
     use_latent: true
+    decoder_raw_pixel_injection: true
+    freeze_tokenizer: true
     ensure_rgb_type: null
     _debug: false
     """
@@ -168,6 +173,9 @@ class TokenLayerProjector(nn.Module):
         if x.ndim == 3:
             return self.proj_1d(x)
         raise ValueError(f"Expected 3D or 4D tensor, got ndim={x.ndim}")
+
+
+# --------- SSL Neck ------------ #
 
 
 class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
@@ -216,8 +224,7 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
         self.freeze_backbone = freeze_backbone
         self.patch_size = 16  # TODO: set in config
 
-        logger.info(f"[Tokenizer backbone adapted]: embed dim={self.embed_dim}")
-        logger.info(f"[Tokenizer backbone adapted]: interaction_indexes={self.interaction_indexes}")
+        logger.info(f"embed dim={self.embed_dim}, interaction_indexes={self.interaction_indexes}")
 
         if freeze_backbone:
             self.backbone.eval()
@@ -311,6 +318,9 @@ class HybridTokenizerEncoderAdapter(DINOv3_Adapter):
         return F.interpolate(x, scale_factor=r, mode="bilinear", align_corners=False)
 
 
+# -------- SSL backbone + neck + decoder --------- #
+
+
 class TokenizerHybridUNet(nn.Module):
     """
     U-Net with DINOv3_Adapter as encoder, compatible with PlainConvUNet interface
@@ -325,7 +335,17 @@ class TokenizerHybridUNet(nn.Module):
 
         self.force_rgb_input = cfg.ensure_rgb_type is not None
         self.use_latent = cfg.use_latent
+        self.use_decoder_raw_pixel_injection = bool(cfg.get("decoder_raw_pixel_injection", False))
+        self.freeze_tokenizer = bool(cfg.get("freeze_tokenizer", True))
+        self.grad_checkpointing = self.tok_f_cfg.with_cp
         self._debug = cfg._debug
+
+        # infos
+        logger.info(
+            f"use decoder raw pixel injection: {self.use_decoder_raw_pixel_injection}, "
+            f"freeze tokenizer: {self.freeze_tokenizer}, "
+            f"grad checkpointing: {self.grad_checkpointing}"
+        )
 
         # Validate parameters
         n_conv_per_stage = self.adapter_cfg.n_conv_per_stage
@@ -356,22 +376,24 @@ class TokenizerHybridUNet(nn.Module):
 
         # Create decoder
         self.decoder = UNetDecoder(
-            self.encoder,
-            cfg.num_classes,  # segmentation classes
-            self.adapter_cfg.latent_width,
-            self.adapter_cfg.n_conv_per_stage,
-            self.adapter_cfg.depth_per_stage,
+            encoder=self.encoder,
+            num_classes=cfg.num_classes,  # segmentation classes
+            latent_width=self.adapter_cfg.latent_width,
+            raw_px_width=cfg.input_channels * 3 if self.use_decoder_raw_pixel_injection else None,
+            n_conv_per_stage=self.adapter_cfg.n_conv_per_stage,
+            depths_per_stage=self.adapter_cfg.depth_per_stage,
             nonlin_first=self.adapter_cfg.act_first,
             deep_supervision=cfg.deep_supervision,
             block_types=cfg.adapter.block_types,
         )
-        logger.info(f"Created Unet decoder with 4 stages")
+        if self.grad_checkpointing:
+            self.decoder.set_grad_checkpointing()
 
         # Init weights
         self.init_weights()
 
     def _create_tok_encoder(self) -> DINOv3EncoderAdapter:
-        """Create DINOv3 encoder"""
+        """Create SSL backbone encoder"""
         cfg = self.cfg
         f_cfg = self.tok_f_cfg
         a_cfg = self.adapter_cfg
@@ -386,6 +408,9 @@ class TokenizerHybridUNet(nn.Module):
         logger.info(
             f"Creating tokenizer encoder: {model_name}\n"
             f"taken interaction indexes: {interaction_indexes}, select in all layers: {select_in_all_layers}"
+        )
+        logger.info(
+            f"Tokenizer training mode: <green>{'probe (frozen tokenizer)' if self.freeze_tokenizer else 'finetune'}</green>"
         )
 
         # Load DINOv3 backbone
@@ -403,9 +428,6 @@ class TokenizerHybridUNet(nn.Module):
             logger.warning("Using debug mode, using random weights for tokenizer backbone")
         else:
             raise ValueError("pretrained_path must be specified for tokenizer backbone")
-
-        # Freeze the tokenizer
-        tok_backbone.requires_grad_(False)
 
         # Create DINOv3_Adapter using correct interaction layer indices
         dinov3_adapter = HybridTokenizerEncoderAdapter(
@@ -429,6 +451,7 @@ class TokenizerHybridUNet(nn.Module):
             layer_in_channels=f_cfg.get("layer_in_channels", None),
             extractor_type=f_cfg.get("extractor_type", "deform_attention"),
             extractor_kwargs=f_cfg.get("extractor_kwargs", {}),
+            freeze_backbone=self.freeze_tokenizer,
         )
         encoder_adapter = DINOv3EncoderAdapter(
             dinov3_adapter=dinov3_adapter,
@@ -468,7 +491,6 @@ class TokenizerHybridUNet(nn.Module):
 
     def forward(self, x: tuple[Tensor, Tensor] | list[Tensor]):
         """Two time-series images for change detection"""
-
         # Encode two images
         x1, x2 = self._validate_cd_inputs(x)
         skips1, final_h1 = self.encoder(x1)
@@ -477,9 +499,12 @@ class TokenizerHybridUNet(nn.Module):
         # Fuse the skips in CD stages
         fused_skips = self.cd_stage(skips1, skips2)
         latent = self._fuse_latent(final_h1, final_h2)
+        raw_cd = None
+        if self.use_decoder_raw_pixel_injection:
+            raw_cd = torch.cat((x1, x2, torch.abs(x1 - x2)), dim=1)
 
         # Decode
-        output = self.decoder(fused_skips, latent)
+        output = self.decoder(fused_skips, cond=latent, raw_x=raw_cd)
 
         return output
 
@@ -523,28 +548,31 @@ class TokenizerHybridUNet(nn.Module):
 
     def parameters(self, *args, **kwargs):
         for name, param in self.named_parameters(*args, **kwargs):
-            if "backbone" in name:
+            if self.freeze_tokenizer and "backbone" in name:
                 param.requires_grad = False
                 continue
             yield param
 
     def named_parameters(self, *args, **kwargs):
         for name, param in super().named_parameters(*args, **kwargs):
-            if "backbone" in name:
+            if self.freeze_tokenizer and "backbone" in name:
                 param.requires_grad = False
                 continue
             yield name, param
 
     def _filter_backbone_params(self, k: str):
-        return "backbone" in k
+        return self.freeze_tokenizer and "backbone" in k
 
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
-        # Remove backbone parameters from state dict
+        # Remove backbone parameters from state dict in probe mode
         backbone_keys = [k for k in state_dict.keys() if self._filter_backbone_params(k)]
         for k in backbone_keys:
             del state_dict[k]
-        logger.info(f"Get {len(state_dict)} parameters in state_dict (backbone removed).")
+        if self.freeze_tokenizer:
+            logger.info(f"Get {len(state_dict)} parameters in state_dict (backbone removed).")
+        else:
+            logger.info(f"Get {len(state_dict)} parameters in state_dict (backbone kept for finetune).")
         return state_dict
 
     def load_state_dict(self, state_dict, strict: bool = False, return_not_loaded_keys=False, *args, **kwargs):
@@ -579,7 +607,10 @@ def __test_model():
 
     cfg = _create_default_cfg()
     cfg._debug = True
-    cfg.tokenizer_pretrained_path = "runs/pretrained_model_ckpts/NaflexHybridTokenizerLayerNorm.safetensors"
+    cfg.tokenizer_pretrained_path = "runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors"
+    cfg.freeze_tokenizer = False
+
+    breakpoint()
     unet = TokenizerHybridUNet(cfg).cuda()
     print(parameter_count_table(unet))
     # sd = unet.state_dict()

@@ -603,6 +603,7 @@ class FullImageChangeDetectionDataset(Dataset):
         transform: Optional[Any] = None,
         normalize: bool = True,
         to_neg_1_1: bool = False,
+        interp_to_div_by: int | None = None,
     ):
         # Use the base dataset with patch_size=None for full image mode
         self.base_dataset = HyperspectralChangeDetectionDataset(
@@ -614,11 +615,21 @@ class FullImageChangeDetectionDataset(Dataset):
             to_neg_1_1=to_neg_1_1,
         )
 
+        self.interp_to_div_by = interp_to_div_by
+
     def __len__(self) -> int:
         return len(self.base_dataset)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        return self.base_dataset[idx]
+        t1, t2, gt = self.base_dataset[idx].values()
+        if self.interp_to_div_by is not None:
+            h, w = t1.shape[-2:]
+            r = self.interp_to_div_by
+            h_i, w_i = math.ceil(h / r) * r, math.ceil(w / r) * r
+            t1 = F.interpolate(t1[None], size=(h_i, w_i), mode="bilinear")[0]
+            t2 = F.interpolate(t2[None], size=(h_i, w_i), mode="bilinear")[0]
+            gt = F.interpolate(gt[None, None].float(), size=(h_i, w_i), mode="nearest")[0, 0]
+        return {"img1": t1, "img2": t2, "gt": gt}
 
 
 def create_change_detection_dataloader(
@@ -741,6 +752,7 @@ def create_full_image_dataloader(
     transform: Optional[Any] = None,
     normalize: bool = True,
     to_neg_1_1=False,
+    interp_to_div_by: int | None = None,
 ):
     """
     Create a DataLoader for full image hyperspectral change detection.
@@ -763,6 +775,7 @@ def create_full_image_dataloader(
         transform=transform,
         normalize=normalize,
         to_neg_1_1=to_neg_1_1,
+        interp_to_div_by=interp_to_div_by,
     )
 
     dataloader = DataLoader(

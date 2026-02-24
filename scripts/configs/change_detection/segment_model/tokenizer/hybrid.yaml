@@ -27,6 +27,7 @@ cnn_cfg:
       padconv_use_manually_pad: false
     upsample_kwargs:
       interp_type: nearest_interp
+    act_checkpoint: true
   quantizer_type: null
   vf_on_z_or_module: z
   use_repa_loss: false

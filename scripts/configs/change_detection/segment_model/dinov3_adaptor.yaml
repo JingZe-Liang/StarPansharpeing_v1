@@ -10,5 +10,6 @@ overrides:
   input_channels: 3 # RGB for dino model
   num_classes: ${dataset.consts.num_classes}
   use_latent: true
+  decoder_raw_pixel_injection: true
   n_stages: 4
   ensure_rgb_type: mean

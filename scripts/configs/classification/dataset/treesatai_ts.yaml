@@ -1,20 +1,25 @@
-train_bs: 8
-val_bs: 8
+train_bs: 4
+val_bs: 4
 
 dataset_name: TreeSatAI_TS
 root: data/Downstreams/TreeSatAI_TimeSeries
 num_classes: 15
 to_neg_1_1: true
-sensors: [aerial, s1_asc, s1_des, s2]
+sensors: [aerial, s1_asc, s2]
 aerial_hw: [304, 304]
 s1_hw: [32, 32]
 s2_hw: [32, 32]
-max_t_s1: 4
-max_t_s2: 4
+max_t_s1: 50
+max_t_s2: 50
 scale_mode: minmax_neg1_1
 image_interp_mode: bilinear
 s2_mask_interp_mode: nearest
-strict_files: true
+strict_files: false
+label_area_threshold: 0.07
+temporal_sample_cap: 50
+temporal_sampling_mode: official_random_cap_then_max_t
+emit_valid_mask: true
+s1_nan_fill_mode: spatial_mean
 
 consts:
   num_classes: ${..num_classes}
@@ -40,6 +45,11 @@ train:
     s2_mask_interp_mode: ${...s2_mask_interp_mode}
     s2_to_neg_1_1: ${...to_neg_1_1}
     strict_files: ${...strict_files}
+    label_area_threshold: ${...label_area_threshold}
+    temporal_sample_cap: ${...temporal_sample_cap}
+    temporal_sampling_mode: ${...temporal_sampling_mode}
+    emit_valid_mask: ${...emit_valid_mask}
+    s1_nan_fill_mode: ${...s1_nan_fill_mode}
   loader_kwargs:
     batch_size: ${...consts.train_bs}
     num_workers: 4
@@ -51,7 +61,7 @@ val:
   _target_: src.stage2.classification.data.TreeSatAI_timeseries.TreeSatAITimeSeriesDataset.create_dataloader
   dataset_kwargs:
     root: ${...root}
-    split: val
+    split: test
     sensors: ${...sensors}
     label_mode: multi_hot
     scale_mode: ${...scale_mode}
@@ -64,6 +74,11 @@ val:
     s2_mask_interp_mode: ${...s2_mask_interp_mode}
     s2_to_neg_1_1: ${...to_neg_1_1}
     strict_files: ${...strict_files}
+    label_area_threshold: ${...label_area_threshold}
+    temporal_sample_cap: ${...temporal_sample_cap}
+    temporal_sampling_mode: ${...temporal_sampling_mode}
+    emit_valid_mask: ${...emit_valid_mask}
+    s1_nan_fill_mode: ${...s1_nan_fill_mode}
   loader_kwargs:
     batch_size: ${...consts.val_bs}
     num_workers: 4

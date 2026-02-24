@@ -35,19 +35,34 @@ def get_default_transform(prob: float = 0.5) -> AugmentationSequential:
     )
 
 
+def _collect_mask_dir_candidates(mask_dir: str, allow_mask_fallback: bool) -> list[str]:
+    normalized = mask_dir.strip("/")
+    candidates: list[str] = [normalized]
+    if allow_mask_fallback:
+        if normalized == "mask":
+            candidates.extend(["mask_256", "mask256"])
+        elif normalized in {"mask_256", "mask256"}:
+            candidates.extend(["mask256", "mask_256", "mask"])
+        else:
+            candidates.extend(["mask", "mask_256", "mask256"])
+
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
 def _resolve_mask_dir(root: Path, mask_dir: str, mask_subdir: str | None, allow_mask_fallback: bool = True) -> Path:
-    candidate = root / mask_dir
-    if not candidate.exists():
-        if mask_dir == "mask256":
-            candidate = root / "mask_256"
-        elif mask_dir == "mask_256":
-            candidate = root / "mask256"
-    if not candidate.exists() and allow_mask_fallback:
-        fallback = root / "mask"
-        if fallback.exists():
-            candidate = fallback
-    if not candidate.exists():
-        raise FileNotFoundError(f"Mask directory not found: {root / mask_dir}")
+    searched = _collect_mask_dir_candidates(mask_dir=mask_dir, allow_mask_fallback=allow_mask_fallback)
+    candidate: Path | None = None
+    for dirname in searched:
+        path = root / dirname
+        if path.exists():
+            candidate = path
+            break
+    if candidate is None:
+        raise FileNotFoundError(f"Mask directory not found under {root}. Tried: {searched}")
 
     if mask_subdir is None:
         sub_candidate = candidate / "m"
@@ -134,6 +149,15 @@ def _split_ids(
     return selected
 
 
+def _validate_split_ratios(train_ratio: float, val_ratio: float) -> None:
+    if not (0.0 < train_ratio < 1.0):
+        raise ValueError(f"train_ratio must be in (0,1), got {train_ratio}")
+    if not (0.0 <= val_ratio < 1.0):
+        raise ValueError(f"val_ratio must be in [0,1), got {val_ratio}")
+    if train_ratio + val_ratio >= 1.0:
+        raise ValueError(f"train_ratio + val_ratio must be < 1, got {train_ratio + val_ratio}")
+
+
 def _build_samples(
     ids: list[str],
     t1_map: dict[str, Path],
@@ -162,47 +186,62 @@ def _load_binary_mask(path: Path) -> Tensor:
     return torch.from_numpy(mask).long().unsqueeze(0)
 
 
+def _resolve_resize_shape(resize_to: int | tuple[int, int] | list[int] | None) -> tuple[int, int] | None:
+    if resize_to is None:
+        return None
+    if isinstance(resize_to, int):
+        if resize_to <= 0:
+            raise ValueError(f"resize_to must be positive, got {resize_to}")
+        return (resize_to, resize_to)
+    if len(resize_to) != 2:
+        raise ValueError(f"resize_to must have 2 items when sequence is used, got {resize_to}")
+
+    h = int(resize_to[0])
+    w = int(resize_to[1])
+    if h <= 0 or w <= 0:
+        raise ValueError(f"resize_to values must be positive, got {(h, w)}")
+    return (h, w)
+
+
 class DSIFNChangeDetectionDataset(Dataset[dict[str, Tensor | str]]):
     def __init__(
         self,
         data_root: str | Path = "data/Downstreams/ChangeDetection-DSIFN",
         split: Literal["train", "val", "test", "all"] = "train",
-        mask_dir: str = "mask_256",
+        mask_dir: str = "mask",
         mask_subdir: str | None = None,
         train_ratio: float = 0.8,
         val_ratio: float = 0.1,
         transform: AugmentationSequential | None | str = "default",
         normalize: bool = True,
         img_to_neg1_1: bool = False,
-        resize_to_mask: bool = True,
+        resize_to_mask: bool = False,
+        resize_to: int | tuple[int, int] | list[int] | None = None,
         return_name: bool = False,
     ) -> None:
-        if not (0.0 < train_ratio < 1.0):
-            raise ValueError(f"train_ratio must be in (0,1), got {train_ratio}")
-        if not (0.0 <= val_ratio < 1.0):
-            raise ValueError(f"val_ratio must be in [0,1), got {val_ratio}")
-        if train_ratio + val_ratio >= 1.0:
-            raise ValueError(f"train_ratio + val_ratio must be < 1, got {train_ratio + val_ratio}")
-
         self.data_root = Path(data_root)
         self.split = split
         self.normalize = normalize
         self.img_to_neg1_1 = img_to_neg1_1
         self.resize_to_mask = resize_to_mask
+        self.resize_to = _resolve_resize_shape(resize_to)
         self.return_name = return_name
 
         samples: list[DSIFNSamplePaths] = []
         split_roots = _iter_split_roots(self.data_root, split=split)
         explicit_split_layout = split_roots != [self.data_root]
+        use_ratio_split = not explicit_split_layout and split != "all"
+        if use_ratio_split:
+            _validate_split_ratios(train_ratio=train_ratio, val_ratio=val_ratio)
 
         for split_root in split_roots:
             mask_path = _resolve_mask_dir(split_root, mask_dir=mask_dir, mask_subdir=mask_subdir)
             all_ids, t1_map, t2_map, mask_map = _collect_common_ids(split_root, mask_path)
 
-            if explicit_split_layout:
-                selected_ids = all_ids
-            else:
+            if use_ratio_split:
                 selected_ids = _split_ids(all_ids, split=split, train_ratio=train_ratio, val_ratio=val_ratio)
+            else:
+                selected_ids = all_ids
 
             samples.extend(_build_samples(selected_ids, t1_map=t1_map, t2_map=t2_map, mask_map=mask_map))
 
@@ -224,10 +263,13 @@ class DSIFNChangeDetectionDataset(Dataset[dict[str, Tensor | str]]):
         img2 = _load_rgb(sample.img2)
         gt = _load_binary_mask(sample.mask)
 
-        if self.resize_to_mask and img1.shape[-2:] != gt.shape[-2:]:
-            target_hw = gt.shape[-2:]
+        target_hw = self.resize_to
+        if target_hw is None and self.resize_to_mask and img1.shape[-2:] != gt.shape[-2:]:
+            target_hw = tuple(int(x) for x in gt.shape[-2:])
+        if target_hw is not None:
             img1 = F.interpolate(img1.unsqueeze(0), size=target_hw, mode="bilinear", align_corners=False).squeeze(0)
             img2 = F.interpolate(img2.unsqueeze(0), size=target_hw, mode="bilinear", align_corners=False).squeeze(0)
+            gt = F.interpolate(gt.float().unsqueeze(0), size=target_hw, mode="nearest").squeeze(0).long()
 
         if self.normalize:
             img1 = img1 / 255.0
@@ -255,7 +297,7 @@ class DSIFNChangeDetectionDataset(Dataset[dict[str, Tensor | str]]):
 def create_dsifn_change_detection_dataloader(
     data_root: str | Path = "data/Downstreams/ChangeDetection-DSIFN",
     split: Literal["train", "val", "test", "all"] = "train",
-    mask_dir: str = "mask_256",
+    mask_dir: str = "mask",
     mask_subdir: str | None = None,
     train_ratio: float = 0.8,
     val_ratio: float = 0.1,
@@ -265,7 +307,8 @@ def create_dsifn_change_detection_dataloader(
     transform: AugmentationSequential | None | str = "default",
     normalize: bool = True,
     img_to_neg1_1: bool = False,
-    resize_to_mask: bool = True,
+    resize_to_mask: bool = False,
+    resize_to: int | tuple[int, int] | list[int] | None = None,
     return_name: bool = False,
     pin_memory: bool = True,
     drop_last: bool = False,
@@ -281,6 +324,7 @@ def create_dsifn_change_detection_dataloader(
         normalize=normalize,
         img_to_neg1_1=img_to_neg1_1,
         resize_to_mask=resize_to_mask,
+        resize_to=resize_to,
         return_name=return_name,
     )
 

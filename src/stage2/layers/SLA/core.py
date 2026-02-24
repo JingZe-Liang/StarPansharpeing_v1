@@ -390,7 +390,7 @@ class SageSparseLinearAttention(nn.Module):
             ksum = torch.sum(k, dim=-2, keepdim=True)
             return (q @ kvsum) / (1e-5 + (q * ksum).sum(dim=-1, keepdim=True))
 
-        breakpoint()
+        # breakpoint()
         o_l = calc_linear(q, k, v)
 
         with torch.amp.autocast("cuda", dtype=self.dtype):

@@ -1,0 +1,65 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - dataset: treesatai_ts_official
+  - accelerator: base
+  - model: omnisat_mm_classifier
+  - _self_
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
+  beta: 0.99
+  update_after_step: 100
+  update_every: 1
+
+metric:
+  task: multilabel
+  num_classes: ${dataset.consts.num_classes}
+  num_labels: ${dataset.consts.num_labels}
+  threshold: 0.5
+  map_average: macro
+
+train:
+  proj_dir: runs/stage2_classification/
+  model_name: omnisat_mm_classifier
+  max_grad_norm: 1.0
+  max_steps: 100_000
+  save_every: 2000
+  grad_check: false
+  label_key: label
+  label_smoothing: 0.0
+  class_weights: null
+  pos_weight: null
+
+  resume_path:
+  ema_load_path:
+
+  model_optim:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 2.0e-4
+    betas: [0.9, 0.999]
+    weight_decay: 0.01
+
+  model_sched:
+    _target_: transformers.optimization.get_constant_schedule
+    _partial_: true
+
+  log:
+    run_comment: ${dataset.dataset_name}_omni_mm
+    log_with_time: true
+    log_every: 20
+    log_with: [wandb]
+
+  debug: true
+
+val:
+  val_duration: 1000
+  max_val_iters: 30
+  use_ema: true

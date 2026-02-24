@@ -40,5 +40,6 @@ adapter:
 num_classes: ${dataset.consts.num_classes}
 input_channels: ${dataset.consts.bands}
 use_latent: true
+freeze_tokenizer: true
 # Tokenizer pretrained path (needs to be overridden)
 tokenizer_pretrained_path: runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors

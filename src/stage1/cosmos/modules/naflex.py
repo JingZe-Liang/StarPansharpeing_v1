@@ -612,7 +612,6 @@ class EvaBlock(nn.Module):
             self.post_norm2 = norm_layer(dim, **dd)
             self._post_norm_skip_first_layer = bool(post_norm_skip_first_layer) and self.layer_idx == 0
         else:
-            self.register_buffer("post_norm_alpha", torch.tensor(1.0, **dd), persistent=False)
             self.post_norm1 = nn.Identity()
             self.post_norm2 = nn.Identity()
             self._post_norm_skip_first_layer = False
@@ -675,7 +674,8 @@ class EvaBlock(nn.Module):
         if self._post_norm_skip_first_layer:
             return self._forward_eva_block_prenorm(x, rope=rope, attn_mask=attn_mask, v_residual_v1=v_residual_v1)
 
-        alpha: Tensor = self.post_norm_alpha  # ty: ignore[invalid-assignment]
+        alpha = getattr(self, "post_norm_alpha", None)
+        assert alpha is not None, "post_norm_alpha is required for post-norm blocks"
         if self.gamma_1 is None:
             attn_out = self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask)
         else:

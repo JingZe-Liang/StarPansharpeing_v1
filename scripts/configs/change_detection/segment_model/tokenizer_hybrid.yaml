@@ -33,9 +33,9 @@ tokenizer_feature:
 adapter:
   adapter_type: default
   latent_width: 32
-  n_conv_per_stage: 1
-  depth_per_stage: 1
-  norm: rmsnorm2dfp32
+  n_conv_per_stage: 2
+  depth_per_stage: 2
+  norm: layernorm2d
   act: gelu
   drop: 0.0
   act_first: false
@@ -47,7 +47,7 @@ cd_stage:
   channels: [384, 384, 512, 512]
   stride: 1
   kernel_size: 3
-  norm_layer: rmsnorm2dfp32
+  norm_layer: layernorm2d
   act_layer: gelu
   expand_ratio: 2.0
   block_type: mbconv
@@ -60,6 +60,8 @@ num_classes: ${dataset.consts.num_classes}
 deep_supervision: false
 n_stages: 4
 use_latent: true
+decoder_raw_pixel_injection: true
+freeze_tokenizer: false
 ensure_rgb_type: null
 _debug: false
 

@@ -1,0 +1,20 @@
+_target_: src.stage2.classification.model.OmniSatMMClassifier
+
+num_classes: ${dataset.consts.num_classes}
+modalities: [aerial, s2, s1-asc]
+
+embed_dim: 256
+depth: 6
+num_heads: 16
+mlp_ratio: 4.0
+class_token: true
+pre_norm: false
+
+drop_rate: 0.2
+pos_drop_rate: 0.2
+patch_drop_rate: 0.0
+drop_path_rate: 0.2
+attn_drop_rate: 0.2
+num_patches: 36
+
+head_hidden_dims: []

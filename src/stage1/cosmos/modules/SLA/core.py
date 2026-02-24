@@ -390,7 +390,7 @@ class SageSparseLinearAttention(nn.Module):
             ksum = torch.sum(k, dim=-2, keepdim=True)
             return (q @ kvsum) / (1e-5 + (q * ksum).sum(dim=-1, keepdim=True))
 
-        breakpoint()
+        # breakpoint()
         o_l = calc_linear(q, k, v)
 
         with torch.amp.autocast("cuda", dtype=self.dtype):
@@ -405,17 +405,36 @@ class SageSparseLinearAttention(nn.Module):
 
 if __name__ == "__main__":
     """
-        python -m src.stage2.layers.SLA.core
+        python -m src.stage1.cosmos.modules.SLA.core
     """
-    # net = SparseLinearAttention(1024 // 16, topk=16).cuda()
-    net = SageSparseLinearAttention(1024 // 16, topk=16).cuda()
+    op_type = "sla"
     L = 64 * 64
     bs = 16
-    q = torch.randn(bs, 16, L, 1024 // 16).cuda()
-    k = torch.randn(bs, 16, L, 1024 // 16).cuda()
-    v = torch.randn(bs, 16, L, 1024 // 16).cuda()
 
-    out = net(q, k, v, return_sparsity=False)
+    if op_type == "sla":
+        net = SparseLinearAttention(1024 // 16, topk=0.1).cuda()
+    elif op_type == "sage_sla":
+        net = SageSparseLinearAttention(1024 // 16, topk=0.1).cuda()
+    elif op_type == "attn":
+        net = torch.nn.MultiheadAttention(embed_dim=1024, num_heads=16, batch_first=True).cuda()
+    else:
+        raise
+
+    if op_type == "attn":
+        q = torch.randn(bs, L, 1024).cuda()
+        k = torch.randn(bs, L, 1024).cuda()
+        v = torch.randn(bs, L, 1024).cuda()
+        kwargs = {}
+    else:
+        q = torch.randn(bs, 16, L, 1024 // 16).cuda()
+        k = torch.randn(bs, 16, L, 1024 // 16).cuda()
+        v = torch.randn(bs, 16, L, 1024 // 16).cuda()
+        kwargs = {"return_sparsity": True}
+
+    out = net(q, k, v, **kwargs)
+    if op_type != "attn":
+        out, sparsity = out
+        print(f"real sparsity: {sparsity}")
     print(out.shape)
 
     loss = out - torch.randn_like(out)

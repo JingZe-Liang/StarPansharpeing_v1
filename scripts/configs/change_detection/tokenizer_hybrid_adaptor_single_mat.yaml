@@ -32,9 +32,10 @@ metric:
   ignore_index: 255
   include_bg: false
   input_format: index
+  f1_cd: true
 
 train:
-  val_slide_window: true
+  val_slide_window: false
   grad_check: false
   act_checkpoint: true
   val_slide_window_kwargs:
@@ -78,12 +79,6 @@ train:
     oned_params_defaults:
       lr: 4.0e-4
       weight_decay: 0.0
-    # reg_mask_mode: magma
-    # magma_wrap_kwargs:
-    #   survival_prob: 0.5
-    #   tau: 2.0
-    #   ema_beta: 0.9
-    #   seed: 2026
 
   segment_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup
@@ -99,5 +94,5 @@ train:
   debug: true
 
 val:
-  val_duration: 200
+  val_duration: 100
   max_val_iters: -1

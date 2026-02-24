@@ -6,7 +6,7 @@ from collections import namedtuple
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Callable, Literal, Sequence, cast
+from typing import Callable, Literal, Sequence, cast, Any
 
 import accelerate
 import hydra
@@ -15,6 +15,7 @@ import numpy as np
 import PIL.Image as Image
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from accelerate.tracking import TensorBoardTracker
@@ -61,6 +62,7 @@ class HyperCDTrainer:
     def __init__(self, cfg: DictConfig):
         # To EasyDict
         cfg = to_easydict_recursive(cfg)
+
         self.cfg = cfg
         # Tokenizer configuration is now handled by wrapper
         self.train_cfg = cfg.train
@@ -116,9 +118,7 @@ class HyperCDTrainer:
         self._is_ds = _dpsp_plugin is not None
         if self._is_ds:
             self.log_msg("[Deepspeed]: using deepspeed plugin")
-            self.no_ema = _dpsp_plugin.deepspeed_config["zero_optimization"][  # type: ignore
-                "stage"
-            ] in [2, 3]
+            self.no_ema = _dpsp_plugin.deepspeed_config["zero_optimization"]["stage"] in [2, 3]
 
         self._is_fsdp = _fsdp_plugin is not None
         if self._is_fsdp:
@@ -129,9 +129,9 @@ class HyperCDTrainer:
         self.train_dataset, self.train_dataloader = hydra.utils.instantiate(self.dataset_cfg.train)
         self.val_dataset, self.val_dataloader = hydra.utils.instantiate(self.dataset_cfg.val)
         if _dpsp_plugin is not None:
-            self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
-                "train_micro_batch_size_per_gpu"
-            ] = self.dataset_cfg.batch_size_train
+            self.accelerator.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = (
+                self.dataset_cfg.batch_size_train
+            )
 
         # setup the segmentation model
         self.setup_segmentation_model()  # setup the segmentation model
@@ -168,6 +168,15 @@ class HyperCDTrainer:
 
         segment_name = getattr(self.train_cfg, "segment_name", None) or self.model.__class__.__name__
         self.log_msg(f"use change detection model: {segment_name}")
+
+        # print model info
+        from fvcore.nn import parameter_count_table
+
+        print(
+            "------------- Model info ---------------\n"
+            f"{parameter_count_table(self.model)}"
+            "----------------------------------------\n"
+        )
 
     def prepare_ema_models(self):
         if self.no_ema:
@@ -559,28 +568,46 @@ class HyperCDTrainer:
                 FSDP.clip_grad_norm_(model.parameters(), max_norm=_max_grad_norm)
 
     def compute_segmentation_loss(self, out, gt):
+        def _format_loss_log(loss):
+            if isinstance(loss, torch.Tensor):
+                log_losses = {"seg_loss": loss.detach()}
+            elif isinstance(loss, (tuple, list)):
+                loss, log_losses = loss
+            else:
+                raise NotImplementedError(f"Unknown type {type(loss)}")
+
+            return loss, log_losses
+
         # loss, ensure gt is long and ndim == 3
         gt = gt.type(torch.long).squeeze_(1)
         assert gt.ndim == 3, f"gt ndim should be 3, got {gt.ndim} of shape {gt.shape}"
-        out, gt = out.contiguous(), gt.contiguous()
-        loss = self.segment_loss(out, gt)
-
-        if isinstance(loss, torch.Tensor):
-            log_losses = {"seg_loss": loss.detach()}
-        elif isinstance(loss, (tuple, list)):
-            loss, log_losses = loss
+        if isinstance(out, tuple | list):
+            assert len(out) >= 1
+            loss = 0.0
+            logs = []
+            for i, o in enumerate(out):
+                gt_resized = F.interpolate(gt[:, None].to(torch.float32), size=o.shape[-2:], mode="nearest")[:, 0].to(
+                    torch.long
+                )
+                loss_out = self.segment_loss(o, gt_resized)
+                loss_i, log_losses = _format_loss_log(loss_out)
+                logs.append(log_losses)
+                loss = loss + loss_i
+            loss = loss / len(out)
+            log_losses = logs[0]
         else:
-            raise NotImplementedError(f"Unknown type {type(loss)}")
+            loss = self.segment_loss(out, gt)
+            loss, log_losses = _format_loss_log(loss)
 
         return loss, edict(log_losses)
 
     def forward_segment_model(self, img1, img2, gt, ema=False):
-        model = self.ema_model.ema_model if ema and not self.no_ema else self.model
+        model = self.ema_model if ema and not self.no_ema else self.model
         with self.accelerator.autocast():
             # pixel data -> wrapper (handles tokenization + change detection)
             out = model([img1, img2])
             # loss
-            loss, log_losses = self.compute_segmentation_loss(out, gt.to(out.device))
+            loss, log_losses = self.compute_segmentation_loss(out, gt.to(self.device))
 
         return out, loss, log_losses
 
@@ -920,10 +947,16 @@ class HyperCDTrainer:
             # revert back to a full image
             pred_seg, *_ = (self._reconstruct_hypersigma_image(macro_outputs, mode="val")).values()
         else:
+            min_window_size = None
+            if self.train_cfg.val_slide_window:
+                min_window_size = int(self.train_cfg.val_slide_window_kwargs.patch_size)
+            batch, original_hw = self._align_val_batch_to_model_input(batch, min_window_size=min_window_size)
 
             def _val_model_closure(batch):
                 # forward the segmentation network with pixel data
                 pred_seg, *_ = self.forward_segment_model(batch["img1"], batch["img2"], batch["gt"], ema=True)
+                if isinstance(pred_seg, (tuple, list)):
+                    pred_seg = pred_seg[0]
                 return {"pred_logits": pred_seg}
 
             # slide windows
@@ -940,8 +973,78 @@ class HyperCDTrainer:
             else:
                 # logger.info(f"[Val]: using full image validation", once=True)
                 pred_seg = _val_model_closure(batch)["pred_logits"].argmax(1)
+            pred_seg = self._crop_to_original_hw(pred_seg, original_hw)
 
         return pred_seg
+
+    def _align_val_batch_to_model_input(
+        self,
+        batch: dict[str, torch.Tensor],
+        *,
+        min_window_size: int | None = None,
+    ) -> tuple[dict[str, torch.Tensor], tuple[int, int]]:
+        img1 = batch["img1"]
+        original_hw = (img1.shape[-2], img1.shape[-1])
+        target_h, target_w = original_hw
+
+        divisor = int(getattr(self.train_cfg, "model_input_divisor", 32))
+        if divisor > 1:
+            target_h = math.ceil(target_h / divisor) * divisor
+            target_w = math.ceil(target_w / divisor) * divisor
+
+        if min_window_size is not None:
+            target_h = max(target_h, min_window_size)
+            target_w = max(target_w, min_window_size)
+
+        if (target_h, target_w) == original_hw:
+            return batch, original_hw
+
+        aligned_batch = dict(batch)
+        target_hw = (target_h, target_w)
+
+        for key in ("img1", "img2"):
+            if key in aligned_batch and torch.is_tensor(aligned_batch[key]):
+                aligned_batch[key] = self._pad_tensor_right_bottom(
+                    aligned_batch[key],
+                    target_hw,
+                    mode="replicate",
+                    pad_value=0,
+                )
+
+        if "gt" in aligned_batch and torch.is_tensor(aligned_batch["gt"]):
+            aligned_batch["gt"] = self._pad_tensor_right_bottom(
+                aligned_batch["gt"],
+                target_hw,
+                mode="constant",
+                pad_value=255,
+            )
+
+        return aligned_batch, original_hw
+
+    @staticmethod
+    def _pad_tensor_right_bottom(
+        x: torch.Tensor,
+        target_hw: tuple[int, int],
+        *,
+        mode: Literal["constant", "replicate"],
+        pad_value: int,
+    ) -> torch.Tensor:
+        h, w = x.shape[-2], x.shape[-1]
+        target_h, target_w = target_hw
+        pad_h = max(0, target_h - h)
+        pad_w = max(0, target_w - w)
+        if pad_h == 0 and pad_w == 0:
+            return x
+
+        if mode == "replicate" and x.ndim >= 4:
+            return F.pad(x, (0, pad_w, 0, pad_h), mode="replicate")
+
+        return F.pad(x, (0, pad_w, 0, pad_h), mode="constant", value=pad_value)
+
+    @staticmethod
+    def _crop_to_original_hw(x: torch.Tensor, original_hw: tuple[int, int]) -> torch.Tensor:
+        h, w = original_hw
+        return x[..., :h, :w]
 
     def _resize_to(self, x, mode="nearest"):
         inp_ndim = x.ndim
@@ -961,9 +1064,15 @@ class HyperCDTrainer:
             return x
         raise ValueError(f"Expected label map shaped [B,H,W] or [B,1,H,W], but got {tuple(x.shape)}")
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def val_loop(self):
         self.model.eval()
+        ema_eval_model = None
+        if not self.no_ema:
+            ema_wrapper = getattr(self, "ema_model", None)
+            if ema_wrapper is not None:
+                ema_eval_model = ema_wrapper.ema_model
+                ema_eval_model.eval()
         cd_metrics = hydra.utils.instantiate(self.metric_cfg).to(self.device)
 
         val_iter = self.get_val_loader_iter()
@@ -996,6 +1105,8 @@ class HyperCDTrainer:
         loss_val = 0.0
 
         self.model.train()
+        if ema_eval_model is not None:
+            ema_eval_model.train()
         self.optim.zero_grad()
 
         if self.accelerator.is_main_process:
@@ -1230,7 +1341,7 @@ class HyperCDTrainer:
         self.train_loop()
 
 
-_key = "tokenizer_hybrid_adaptor_dsifn"
+_key = "tokenizer_hybrid_adaptor_levir_cd"
 _configs_dict = {
     "tokenizer_dinov3_adaptor": "tokenizer_dinov3_adaptor",
     "tokenizer_hybrid_adaptor": "tokenizer_hybrid_adaptor",
@@ -1238,6 +1349,7 @@ _configs_dict = {
     "tokenizer_hybrid_adaptor_cabuar": "tokenizer_hybrid_adaptor_cabuar",
     "tokenizer_hybrid_adaptor_dsifn": "tokenizer_hybrid_adaptor_dsifn",
     "tokenizer_hybrid_adaptor_xview2": "tokenizer_hybrid_adaptor_xview2",
+    "tokenizer_hybrid_adaptor_levir_cd": "tokenizer_hybrid_adaptor_levir_cd",
 }
 
 

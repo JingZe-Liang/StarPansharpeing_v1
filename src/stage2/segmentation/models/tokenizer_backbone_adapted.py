@@ -128,6 +128,7 @@ def _create_default_cfg():
     deep_supervision: false
     n_stages: 4
     use_latent: true
+    freeze_tokenizer: true
     ensure_rgb_type: null
     _debug: false
     """
@@ -328,6 +329,7 @@ class TokenizerHybridUNet(nn.Module):
 
         self.force_rgb_input = cfg.ensure_rgb_type is not None
         self.use_latent = cfg.use_latent
+        self.freeze_tokenizer = bool(cfg.get("freeze_tokenizer", True))
         self._debug = cfg._debug
 
         # Validate parameters
@@ -379,6 +381,7 @@ class TokenizerHybridUNet(nn.Module):
             f"Creating tokenizer encoder: {model_name}\n"
             f"taken interaction indexes: {interaction_indexes}, select in all layers: {select_in_all_layers}"
         )
+        logger.info(f"Tokenizer training mode: {'probe (frozen tokenizer)' if self.freeze_tokenizer else 'finetune'}")
 
         # Load DINOv3 backbone
         tok_backbone = CosmosHybridTokenizer.create_model(
@@ -395,9 +398,6 @@ class TokenizerHybridUNet(nn.Module):
             logger.warning(f"Using debug mode, using random weights for tokenizer backbone")
         else:
             raise ValueError("pretrained_path must be specified for tokenizer backbone")
-
-        # freeze the tokenizer
-        tok_backbone.requires_grad_(False)
 
         # Create DINOv3_Adapter using correct interaction layer indices
         dinov3_adapter = HybridTokenizerEncoderAdapter(
@@ -421,6 +421,7 @@ class TokenizerHybridUNet(nn.Module):
             layer_in_channels=f_cfg.get("layer_in_channels", None),
             extractor_type=f_cfg.get("extractor_type", "deform_attention"),
             extractor_kwargs=f_cfg.get("extractor_kwargs", {}),
+            freeze_backbone=self.freeze_tokenizer,
         )
         encoder_adapter = DINOv3EncoderAdapter(
             dinov3_adapter=dinov3_adapter,
@@ -483,26 +484,31 @@ class TokenizerHybridUNet(nn.Module):
 
     def parameters(self, *args, **kwargs):
         for name, param in self.named_parameters(*args, **kwargs):
-            if "backbone" in name:
+            if self.freeze_tokenizer and "backbone" in name:
                 param.requires_grad = False
+                continue
             yield param
 
     def named_parameters(self, *args, **kwargs):
         for name, param in super().named_parameters(*args, **kwargs):
-            if "backbone" in name:
+            if self.freeze_tokenizer and "backbone" in name:
                 param.requires_grad = False
+                continue
             yield name, param
 
     def _filter_backbone_params(self, k: str):
-        return "backbone" in k
+        return self.freeze_tokenizer and "backbone" in k
 
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
-        # Remove backbone parameters from state dict
+        # Remove backbone parameters from state dict in probe mode
         backbone_keys = [k for k in state_dict.keys() if self._filter_backbone_params(k)]
         for k in backbone_keys:
             del state_dict[k]
-        logger.info(f"Get {len(state_dict)} parameters in state_dict (backbone removed).")
+        if self.freeze_tokenizer:
+            logger.info(f"Get {len(state_dict)} parameters in state_dict (backbone removed).")
+        else:
+            logger.info(f"Get {len(state_dict)} parameters in state_dict (backbone kept for finetune).")
         return state_dict
 
     def load_state_dict(self, state_dict, strict: bool = False, return_not_loaded_keys=False, *args, **kwargs):

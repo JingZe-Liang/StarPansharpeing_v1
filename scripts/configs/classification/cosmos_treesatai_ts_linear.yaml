@@ -14,11 +14,11 @@ defaults:
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
-  beta: 0.995
-  update_after_step: 1000
-  update_every: 2
-  allow_different_devices: true
-  lazy_init_ema: true
+  beta: 0.99
+  update_after_step: 100
+  update_every: 1
+  # allow_different_devices: false
+  # lazy_init_ema: false
 
 metric:
   task: multilabel
@@ -31,14 +31,14 @@ train:
   proj_dir: runs/stage2_classification/
   model_name: cosmos_tokenizer_ts
   max_grad_norm: 1.0
-  max_steps: 10_000
-  save_every: 500
-  grad_check: true
+  max_steps: 100_000
+  save_every: 2000
+  grad_check: false
   label_key: label
   label_smoothing: 0.0
   class_weights: null
   pos_weight: null
-  freeze_tokenizer: true
+  freeze_tokenizer: false
   tokenizer_pretrained_path: runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors
 
   resume_path:
@@ -46,10 +46,25 @@ train:
   is_neg_1_1: ${dataset.consts.to_neg_1_1}
 
   model_optim:
-    _target_: torch.optim.AdamW
+    _target_: heavyball.AdamW
     _partial_: true
-    lr: 4.0e-4
-    weight_decay: 0.0
+    lr: 3.0e-4
+    betas: [0.9, 0.95]
+    weight_decay: 0.01
+    caution: true
+    foreach: true
+
+    # _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    # _partial_: true
+    # betas: [0.9, 0.95]
+    # oned_param_algo: lion
+    # use_triton: true
+    # muon_params_defaults:
+    #   lr: 4.0e-4
+    #   weight_decay: 0.01
+    # oned_params_defaults:
+    #   lr: 4.0e-4
+    #   weight_decay: 0.0
 
   model_sched:
     _target_: transformers.optimization.get_constant_schedule
@@ -65,9 +80,5 @@ train:
 
 val:
   val_duration: 1000
-  max_val_iters: -1
-  use_ema: false
-
-dataset:
-  max_t_s1: null
-  max_t_s2: null
+  max_val_iters: 30
+  use_ema: true

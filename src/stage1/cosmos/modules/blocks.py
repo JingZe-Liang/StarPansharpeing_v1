@@ -118,6 +118,10 @@ def _to_conv_channels_last_memformat(x: Tensor) -> Tensor:
     return x.contiguous(memory_format=torch.channels_last)
 
 
+def _can_use_activation_checkpoint(training: bool) -> bool:
+    return training and torch.is_grad_enabled() and (not torch.is_inference_mode_enabled())
+
+
 def _pad2d_like_conv(x: Tensor, pad: int, padding_mode: str) -> Tensor:
     """
     Padding in nn.Conv2d will cause the channels_last memory format to
@@ -416,7 +420,7 @@ class AttnBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         fn = self.forward_fn_math if not self.sdpa else self.forward_fn_sdpa
-        if self.act_checkpoint:
+        if self.act_checkpoint and _can_use_activation_checkpoint(self.training):
             return checkpoint(fn, x, use_reentrant=False)
         return fn(x)
 
@@ -2534,7 +2538,7 @@ class MoE2DBlock(nn.Module):
         return x
 
     def forward(self, x):
-        if self.training and self.act_checkpoint:
+        if self.act_checkpoint and _can_use_activation_checkpoint(self.training):
             return checkpoint(self._forward_fn, x, use_reentrant=False)
         return self._forward_fn(x)
 
@@ -2763,7 +2767,7 @@ class DiCoBlock(nn.Module):
         return h
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.act_checkpoint and self.training:
+        if self.act_checkpoint and _can_use_activation_checkpoint(self.training):
             return checkpoint(self.forward_fn, x, use_reentrant=False)
 
         return self.forward_fn(x)
@@ -2857,7 +2861,7 @@ class ResnetBlock(nn.Module):
         *args,
         **kwargs,
     ) -> torch.Tensor:
-        if self.act_checkpoint and self.training:
+        if self.act_checkpoint and _can_use_activation_checkpoint(self.training):
             return checkpoint(self.forward_fn, x, use_reentrant=False)
         return self.forward_fn(x)
 
@@ -2943,7 +2947,7 @@ class ResnetBlockSlotsInjected(ResnetBlock):
         return x + h
 
     def forward(self, x: torch.Tensor, slots: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        if self.act_checkpoint and self.training:
+        if self.act_checkpoint and _can_use_activation_checkpoint(self.training):
             return checkpoint(self.forward_fn, x, slots, t, use_reentrant=False)  # type: ignore
         return self.forward_fn(x, slots, t)
 
@@ -3009,7 +3013,7 @@ class ConvNeXtBlock(nn.Module):
         return x
 
     def forward(self, x):
-        if self.act_checkpoint and self.training:
+        if self.act_checkpoint and _can_use_activation_checkpoint(self.training):
             return checkpoint(self.forward_fn, x, use_reentrant=False)  # type: ignore
         return self.forward_fn(x)
 

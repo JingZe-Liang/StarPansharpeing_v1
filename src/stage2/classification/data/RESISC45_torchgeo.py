@@ -2,6 +2,7 @@
 NWPU-RESISC45 dataset using TorchGeo with augmentations and optional [-1, 1] normalization.
 """
 
+from collections import defaultdict
 from typing import Any
 
 import kornia.augmentation as K
@@ -21,6 +22,8 @@ class RESISC45(TorchGeoRESISC45):
         root: str = "data",
         split: str = "train",
         to_neg_1_1: bool = True,
+        propotion: float = 1.0,
+        sampling_seed: int = 2025,
         download: bool = False,
         checksum: bool = False,
     ) -> None:
@@ -31,10 +34,16 @@ class RESISC45(TorchGeoRESISC45):
             root: Root directory where dataset can be found.
             split: One of "train", "val", or "test".
             to_neg_1_1: If True, normalize image values to [-1, 1].
+            propotion: Balanced sampling ratio in (0, 1]. For example, 0.1 means
+                sampling 10% with equal count per class.
+            sampling_seed: Random seed for balanced sampling index selection.
             download: If True, download dataset and store it in the root directory.
             checksum: If True, check the MD5 of the downloaded files.
         """
+        self._validate_propotion(propotion)
         self.to_neg_1_1 = to_neg_1_1
+        self.propotion = propotion
+        self.sampling_seed = sampling_seed
 
         aug_list: list[Any] = []
         if split == "train":
@@ -72,6 +81,51 @@ class RESISC45(TorchGeoRESISC45):
             download=download,
             checksum=checksum,
         )
+        labels = self._extract_labels()
+        self.sample_indices = self._build_balanced_indices(
+            labels=labels,
+            propotion=self.propotion,
+            seed=self.sampling_seed,
+        )
+
+    @staticmethod
+    def _validate_propotion(propotion: float) -> None:
+        if not (0.0 < propotion <= 1.0):
+            raise ValueError(f"propotion must be in (0, 1], got {propotion}.")
+
+    def _extract_labels(self) -> list[int]:
+        if hasattr(self, "targets"):
+            return [int(label) for label in self.targets]
+        return [int(label) for _, label in self.samples]
+
+    @staticmethod
+    def _build_balanced_indices(labels: list[int], propotion: float, seed: int) -> list[int]:
+        RESISC45._validate_propotion(propotion)
+        if not labels:
+            return []
+        if propotion == 1.0:
+            return list(range(len(labels)))
+
+        grouped_indices: dict[int, list[int]] = defaultdict(list)
+        for idx, label in enumerate(labels):
+            grouped_indices[label].append(idx)
+
+        min_class_count = min(len(class_indices) for class_indices in grouped_indices.values())
+        samples_per_class = max(1, int(min_class_count * propotion))
+
+        generator = torch.Generator().manual_seed(seed)
+        sampled_indices: list[int] = []
+        for class_id in sorted(grouped_indices):
+            class_indices = grouped_indices[class_id]
+            perm = torch.randperm(len(class_indices), generator=generator)
+            selected = [class_indices[i] for i in perm[:samples_per_class].tolist()]
+            sampled_indices.extend(selected)
+
+        sampled_indices.sort()
+        return sampled_indices
+
+    def __len__(self) -> int:
+        return len(self.sample_indices)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         """
@@ -83,7 +137,8 @@ class RESISC45(TorchGeoRESISC45):
         Returns:
             A dictionary containing the image and label.
         """
-        sample = super().__getitem__(index)
+        dataset_index = self.sample_indices[index]
+        sample = super().__getitem__(dataset_index)
         image = sample["image"]
 
         if image.dtype == torch.uint8:

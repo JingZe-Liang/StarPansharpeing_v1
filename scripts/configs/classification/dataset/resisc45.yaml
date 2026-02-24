@@ -6,12 +6,14 @@ img_size: 256
 channels: 3
 num_classes: 45
 to_neg_1_1: true
+propotion: 1.0
 
 consts:
   img_size: ${..img_size}
   channels: ${..channels}
   num_classes: ${..num_classes}
   to_neg_1_1: ${..to_neg_1_1}
+  propotion: ${..propotion}
   train_bs: ${..train_bs}
   val_bs: ${..val_bs}
 
@@ -22,6 +24,7 @@ train:
     root: data/Downstreams/RESISC45
     split: train
     to_neg_1_1: ${...consts.to_neg_1_1}
+    propotion: ${...consts.propotion}
     download: false
     checksum: false
   loader_kwargs:

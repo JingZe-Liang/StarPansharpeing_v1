@@ -7,6 +7,7 @@ import hydra
 import numpy as np
 import PIL.Image as Image
 import torch
+import torch.nn.functional as F
 from accelerate.state import PartialState
 from loguru import logger
 from omegaconf import DictConfig
@@ -14,6 +15,7 @@ from torch import Tensor
 
 from scripts.trainer.hyper_latent_change_detection_trainer import CDModelStepOutput, HyperCDTrainer
 from src.data.window_slider import model_predict_patcher
+from src.utilities.config_utils import to_object
 from src.utilities.logging import log
 from src.utilities.train_utils.visualization import get_rgb_image
 
@@ -25,37 +27,50 @@ class SingleHyperImageCDTrainer(HyperCDTrainer):
         super().__init__(cfg)
         self._use_single_img_indexing = True
         self.macro_batch_size = int(getattr(self.train_cfg, "macro_batch_size", 32))
+        self.model_input_divisor = int(getattr(self.train_cfg, "model_input_divisor", 32))
         self.log_msg("[Single CD]: force-enable single-image training mode")
 
-    def _extract_center_logits_and_labels(self, pred_logits: Tensor, gt: Tensor) -> tuple[Tensor, Tensor]:
-        if gt.ndim == 4 and gt.shape[1] == 1:
-            gt = gt.squeeze(1)
-        if gt.ndim != 3:
-            raise ValueError(f"Expected gt with shape [B,H,W] or [B,1,H,W], got {tuple(gt.shape)}")
+    def _align_batch_to_model_input(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        def _resize_to_divisor(x: Tensor, divisor: int, mode: str) -> Tensor:
+            h, w = x.shape[-2:]
+            h_new = ((h + divisor - 1) // divisor) * divisor
+            w_new = ((w + divisor - 1) // divisor) * divisor
+            if h_new == h and w_new == w:
+                return x
+            align_corners = False if mode != "nearest" else None
+            return F.interpolate(x, size=(h_new, w_new), mode=mode, align_corners=align_corners)
 
-        center_h = pred_logits.shape[-2] // 2
-        center_w = pred_logits.shape[-1] // 2
-        gt_center_h = gt.shape[-2] // 2
-        gt_center_w = gt.shape[-1] // 2
-
-        pred_center = pred_logits[:, :, center_h, center_w]  # [B, C]
-        gt_center = gt[:, gt_center_h, gt_center_w]  # [B]
-        return pred_center, gt_center
+        if self.model_input_divisor <= 1:
+            return batch
+        batch["img1"] = _resize_to_divisor(batch["img1"], self.model_input_divisor, mode="bilinear")
+        batch["img2"] = _resize_to_divisor(batch["img2"], self.model_input_divisor, mode="bilinear")
+        gt = batch["gt"]
+        if gt.ndim == 3:
+            gt = gt.unsqueeze(1)
+        gt = _resize_to_divisor(gt.float(), self.model_input_divisor, mode="nearest")
+        batch["gt"] = gt.squeeze(1).long()
+        return batch
 
     def train_single_img_accum_step(self, batch: dict, macro_batch_size: int = 32) -> CDModelStepOutput:
         macro_outputs = self._macro_forward_seg_model(batch, macro_batch_size)
         pred_logits = torch.cat(macro_outputs, dim=0)
+        gt_for_loss = batch["gt"].to(pred_logits.device)
+        if gt_for_loss.ndim == 4 and gt_for_loss.shape[1] == 1:
+            gt_for_loss = gt_for_loss.squeeze(1)
+        if gt_for_loss.ndim != 3:
+            raise ValueError(f"Expected gt with shape [B,H,W] or [B,1,H,W], got {tuple(gt_for_loss.shape)}")
 
-        pred_center, gt_center = self._extract_center_logits_and_labels(pred_logits, batch["gt"])
-        pred_for_loss = pred_center[:, :, None, None].contiguous()
-        # Keep gt as [B, 1, 1, 1] so base trainer squeeze_(1) -> [B, 1, 1]
-        gt_for_loss = gt_center[:, None, None, None].to(pred_for_loss.device)
-        loss, log_losses = self.compute_segmentation_loss(pred_for_loss, gt_for_loss)
+        valid_pixels = (gt_for_loss != 255).sum()
+        if int(valid_pixels.item()) == 0:
+            raise ValueError("All GT pixels are ignore_index (255); cannot compute training loss.")
+
+        loss, log_losses = self.compute_segmentation_loss(pred_logits, gt_for_loss)
         self._optimize_step(loss)
         return CDModelStepOutput(pred_logits, loss, log_losses)
 
     def train_step(self, batch: dict):
         batch = self._cast_to_dtype(batch)
+        batch = self._align_batch_to_model_input(batch)
         with self.accelerator.accumulate(self.model):
             train_out = self.train_single_img_accum_step(batch, self.macro_batch_size)
         self.step_train_state()
@@ -71,6 +86,8 @@ class SingleHyperImageCDTrainer(HyperCDTrainer):
 
     @torch.no_grad()
     def val_step(self, batch: dict):
+        batch = self._align_batch_to_model_input(batch)
+
         def _val_model_closure(batch_inputs: dict[str, Tensor]):
             model = self.ema_model.ema_model if not self.no_ema else self.model
             if model is None:
@@ -90,6 +107,17 @@ class SingleHyperImageCDTrainer(HyperCDTrainer):
             pred_seg = model_outputs["pred_logits"].argmax(1)
         else:
             pred_seg = _val_model_closure(batch)["pred_logits"].argmax(1)
+
+        final_size = self.dataset_cfg.consts.shape[:2]  # h, w
+        pred_seg = (
+            F.interpolate(
+                pred_seg.unsqueeze(1).float(),
+                size=to_object(final_size),
+                mode="nearest",
+            )
+            .squeeze(1)
+            .long()
+        )
 
         return pred_seg
 

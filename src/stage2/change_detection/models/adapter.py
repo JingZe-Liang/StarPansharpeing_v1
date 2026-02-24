@@ -412,6 +412,7 @@ class UNetDecoder(nn.Module):
         encoder: DINOv3EncoderAdapter,
         num_classes: int,
         latent_width: int | None = None,
+        raw_px_width: int | None = None,
         n_conv_per_stage: int | list[int] = 2,
         depths_per_stage: int | list[int] = 2,
         expand_ratio: int | None = None,
@@ -448,6 +449,7 @@ class UNetDecoder(nn.Module):
         super().__init__()
         self.deep_supervision = deep_supervision
         self.num_classes = num_classes
+        self.raw_px_width = raw_px_width
 
         # for other tasks like depth estimation
         self.additional_head = additional_head
@@ -455,7 +457,7 @@ class UNetDecoder(nn.Module):
         conv_op = encoder.conv_op
         n_stages_encoder = len(encoder.output_channels)
 
-        # ------- process output -------- #
+        # output processor
         self.output_processor = {
             "sigmoid": nn.Sigmoid(),
             "softmax": nn.Softmax(dim=1),
@@ -489,6 +491,8 @@ class UNetDecoder(nn.Module):
         transpconvs = []
         seg_layers = []
         scale_layers = []
+        raw_proj_layers = []
+        raw_fuse_layers = []
         for s in range(1, n_stages_encoder):
             input_features_below = encoder.output_channels[-s]
             input_features_skip = encoder.output_channels[-(s + 1)]
@@ -563,6 +567,18 @@ class UNetDecoder(nn.Module):
                 f"out_chans={input_features_skip}, depths={depths}, embed_dim={embed_dim}"
             )
 
+            if self.raw_px_width is None:
+                raw_proj_layers.append(nn.Identity())
+                raw_fuse_layers.append(nn.Identity())
+            else:
+                raw_proj_layers.append(self._make_raw_projector(self.raw_px_width, input_features_skip, conv_bias))
+                raw_fuse_layers.append(
+                    nn.Sequential(
+                        create_norm_act_layer(norm_op, input_features_skip * 2, nonlin),
+                        conv_op(input_features_skip * 2, input_features_skip, 1, 1, 0, bias=conv_bias),
+                    )
+                )
+
             # we always build the deep supervision outputs so that we can always load parameters. If we don't do this
             # then a model trained with deep_supervision=True could not easily be loaded at inference time where
             # deep supervision is not needed. It's just a convenience thing
@@ -587,6 +603,8 @@ class UNetDecoder(nn.Module):
         self.stages = nn.ModuleList(stages)
         self.transpconvs = nn.ModuleList(transpconvs)
         self.seg_layers = nn.ModuleList(seg_layers)
+        self.raw_proj_layers = nn.ModuleList(raw_proj_layers)
+        self.raw_fuse_layers = nn.ModuleList(raw_fuse_layers)
         if self.predict_uncertainty:
             self.scale_layers = nn.ModuleList(scale_layers)
 
@@ -594,6 +612,7 @@ class UNetDecoder(nn.Module):
         self,
         skips: list[Float[Tensor, "b c h w"]],
         cond: Float[Tensor, "b latent_ch h w"] | None = None,
+        raw_x: Float[Tensor, "b pixel_c h w"] | None = None,
     ):
         """
         we expect to get the skips in the order they were computed, so the bottleneck should be the last entry
@@ -608,6 +627,7 @@ class UNetDecoder(nn.Module):
             x = self.transpconvs[s](lres_input)
             x = torch.cat((x, skips[-(s + 2)]), 1)
             x = self.stages[s](x, cond)
+            x = self._fuse_raw_pixels(x, raw_x, stage_idx=s)
             if self.deep_supervision:
                 seg_outputs.append(self.seg_layers[s](x))
                 if self.predict_uncertainty:
@@ -640,6 +660,20 @@ class UNetDecoder(nn.Module):
                     "scale": scale_outputs,
                 }
         return r
+
+    def _make_raw_projector(self, raw_px_width: int | None, out_ch: int, conv_bias: bool) -> nn.Module:
+        if raw_px_width is None:
+            return nn.Sequential(nn.LazyConv2d(out_ch, kernel_size=1, stride=1, padding=0, bias=conv_bias))
+        return nn.Sequential(nn.Conv2d(raw_px_width, out_ch, kernel_size=1, stride=1, padding=0, bias=conv_bias))
+
+    def _fuse_raw_pixels(self, x: Tensor, raw_x: Tensor | None, stage_idx: int) -> Tensor:
+        if raw_x is None or self.raw_px_width is None:
+            return x
+
+        raw_feat = F.interpolate(raw_x, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        raw_feat = self.raw_proj_layers[stage_idx](raw_feat)
+        fused = torch.cat((x, raw_feat), dim=1)
+        return self.raw_fuse_layers[stage_idx](fused)
 
     def _postprocess_scale(self, scale: Tensor) -> Tensor:
         return F.softplus(scale) + 1e-6

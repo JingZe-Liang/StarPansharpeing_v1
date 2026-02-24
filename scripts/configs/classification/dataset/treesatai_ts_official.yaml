@@ -1,0 +1,41 @@
+train_bs: 4
+val_bs: 4
+
+dataset_name: TreeSatAI_TS_Official
+root: data/Downstreams/TreeSatAI_TimeSeries
+num_classes: 15
+modalities: [aerial, s2, s1-asc]
+
+consts:
+  num_classes: ${..num_classes}
+  num_labels: ${..num_classes}
+  train_bs: ${..train_bs}
+  val_bs: ${..val_bs}
+
+train:
+  _target_: src.stage2.classification.data.TreeSatAI_ts_official.TreeSAT.create_dataloader
+  dataset_kwargs:
+    path: ${...root}
+    modalities: ${...modalities}
+    split: train
+    classes: [Abies, Acer, Alnus, Betula, Cleared, Fagus, Fraxinus, Larix, Picea, Pinus, Populus, Prunus, Pseudotsuga, Quercus, Tilia]
+    partition: 1.0
+  loader_kwargs:
+    batch_size: ${...consts.train_bs}
+    num_workers: 4
+    shuffle: true
+    pin_memory: true
+
+val:
+  _target_: src.stage2.classification.data.TreeSatAI_ts_official.TreeSAT.create_dataloader
+  dataset_kwargs:
+    path: ${...root}
+    modalities: ${...modalities}
+    split: test
+    classes: [Abies, Acer, Alnus, Betula, Cleared, Fagus, Fraxinus, Larix, Picea, Pinus, Populus, Prunus, Pseudotsuga, Quercus, Tilia]
+    partition: 1.0
+  loader_kwargs:
+    batch_size: ${...consts.val_bs}
+    num_workers: 4
+    shuffle: false
+    pin_memory: true

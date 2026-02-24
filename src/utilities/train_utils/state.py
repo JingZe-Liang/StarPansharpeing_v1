@@ -658,6 +658,16 @@ def dict_tensor_sync(
     return metrics
 
 
+def metric_loss_mean(lst: list[dict[str, Any]]):
+    ks = [list(d.keys()) for d in lst]
+    assert len(set(ks)) == 1, "All dictionaries in the list must have the same keys"
+
+    out = {}
+    for k in ks[0]:
+        out[k] = sum(d[k] for d in lst) / len(lst)
+    return out
+
+
 def object_all_gather(obj: object):
     if dist.is_initialized() and dist.get_world_size() > 1:
         lst_obj: list[object] = [None] * dist.get_world_size()  # type: ignore

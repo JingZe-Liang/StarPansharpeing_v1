@@ -1,5 +1,5 @@
-train_bs: 3
-val_bs: 1
+train_bs: 4
+val_bs: 4
 
 data_type: null
 label_mode: seg

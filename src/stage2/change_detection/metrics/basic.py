@@ -19,7 +19,11 @@ class ChangeDetectionScore(HyperSegmentationScore):
         per_class: bool = False,
         include_bg: bool = False,
         input_format: Literal["one-hot", "index", "mixed"] = "index",
+        f1_cd: bool = True,
     ) -> None:
+        if f1_cd and n_classes != 2:
+            raise ValueError(f"f1_cd=True only supports binary change detection (n_classes=2), got {n_classes}.")
+
         super().__init__(
             task="multiclass",
             n_classes=n_classes,
@@ -30,6 +34,7 @@ class ChangeDetectionScore(HyperSegmentationScore):
             include_bg=include_bg,
             input_format=input_format,
         )
+        self.f1_cd = f1_cd
         self._cm_metric = ConfusionMatrix(
             task="multiclass" if n_classes > 2 else "binary",
             num_classes=n_classes,
@@ -46,12 +51,15 @@ class ChangeDetectionScore(HyperSegmentationScore):
 
     def _compute_custom_from_cm(self, cm: Tensor) -> dict[str, Tensor]:
         if cm.ndim != 2:
-            return {
+            default_metrics = {
                 "mean_accuracy": torch.tensor(0.0, device=cm.device),
                 "precision": torch.tensor(0.0, device=cm.device),
                 "iou": torch.tensor(0.0, device=cm.device),
                 "fwiou": torch.tensor(0.0, device=cm.device),
             }
+            if self.f1_cd:
+                default_metrics["f1_cd"] = torch.tensor(0.0, device=cm.device)
+            return default_metrics
 
         class_sums = cm.sum(dim=1)
         acc_per_class = torch.diag(cm) / (class_sums + 1e-7)
@@ -71,12 +79,19 @@ class ChangeDetectionScore(HyperSegmentationScore):
         iou_per_class = intersection / (union + 1e-7)
         fwiou = (freq * iou_per_class).sum()
 
-        return {
+        out = {
             "mean_accuracy": mean_accuracy,
             "precision": precision,
             "iou": iou,
             "fwiou": fwiou,
         }
+        if self.f1_cd:
+            if cm.shape[0] != 2:
+                raise ValueError(f"f1_cd=True requires binary confusion matrix shape [2,2], got {tuple(cm.shape)}.")
+            recall = cm[1, 1] / (cm[1, 0] + cm[1, 1] + 1e-7)
+            out["f1_cd"] = 2.0 * precision * recall / (precision + recall + 1e-7)
+
+        return out
 
     def update(self, pred: Tensor, gt: Tensor, mask: Tensor | None = None) -> None:
         super().update(pred, gt, mask=mask)

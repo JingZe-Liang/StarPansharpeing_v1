@@ -104,6 +104,7 @@ class DinoUnetConfig:
     n_stages: int = 4
     use_ms_stage: bool = True
     use_latent: bool = True
+    decoder_raw_pixel_injection: bool = True
     ensure_rgb_type: list = field(default_factory=lambda: [2, 1, 0])
     _debug: bool = False
 
@@ -333,6 +334,7 @@ class DinoUNet(nn.Module):
         # norm_ = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
 
         self.use_latent = cfg.use_latent
+        self.use_decoder_raw_pixel_injection = bool(cfg.decoder_raw_pixel_injection)
         self._debug = cfg._debug
 
         # Validate parameters
@@ -374,11 +376,12 @@ class DinoUNet(nn.Module):
 
         # Create decoder
         self.decoder = UNetDecoder(
-            self.encoder,
-            cfg.num_classes,
-            cfg.adapter.latent_width,
-            cfg.adapter.n_conv_per_stage,
-            cfg.adapter.depth_per_stage,
+            encoder=self.encoder,
+            num_classes=cfg.num_classes,
+            latent_width=cfg.adapter.latent_width,
+            raw_px_width=cfg.input_channels * 3 if self.use_decoder_raw_pixel_injection else None,
+            n_conv_per_stage=cfg.adapter.n_conv_per_stage,
+            depths_per_stage=cfg.adapter.depth_per_stage,
             nonlin_first=cfg.adapter.act_first,
             deep_supervision=cfg.deep_supervision,
         )
@@ -487,9 +490,12 @@ class DinoUNet(nn.Module):
         fused_cond = None
         if self.use_latent:
             fused_cond = self.fuse_conv(torch.cat([cond1, cond2], dim=1))  # type: ignore
+        raw_cd = None
+        if self.use_decoder_raw_pixel_injection:
+            raw_cd = torch.cat((x1, x2, torch.abs(x1 - x2)), dim=1)
 
         # decoder
-        output = self.decoder(skips, fused_cond)
+        output = self.decoder(skips, cond=fused_cond, raw_x=raw_cd)
 
         return output
 

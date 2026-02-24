@@ -739,7 +739,7 @@ class InteractionBlockWithCls(nn.Module):
         if with_cp:
             self.extractor = CheckpointWrapper(self.extractor)
             if self.extra_extractors is not None:
-                self.extra_extractors = nn.ModuleList(
+                self.extra_extractors = nn.ModuleList(  # type: ignore[assignment]
                     [CheckpointWrapper(extractor) for extractor in self.extra_extractors]
                 )
 
