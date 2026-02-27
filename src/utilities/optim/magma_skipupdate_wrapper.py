@@ -231,7 +231,12 @@ class MagmaSkipUpdateWrapper(Optimizer):
             self.mask_config = MagmaMaskConfig(**state_dict["mask_config"])
 
         if "rng_state" in state_dict:
-            self._rng.set_state(state_dict["rng_state"])
+            rng_state = state_dict["rng_state"]
+            if not torch.is_tensor(rng_state):
+                raise TypeError("rng_state must be a torch.Tensor.")
+            # Some checkpoints may store optimizer state tensors on CUDA or non-byte dtype.
+            rng_state = rng_state.detach().to(device="cpu", dtype=torch.uint8)
+            self._rng.set_state(rng_state)
 
         self._mask_state_by_param_id.clear()
         params = self._iter_params()

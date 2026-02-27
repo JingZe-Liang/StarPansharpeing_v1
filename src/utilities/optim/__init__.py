@@ -146,3 +146,15 @@ def get_muon_triton_optimizer(
 
     optim = MuonTriton(gp, defaults=general_defaults)
     return optim
+
+
+def _disable_heavyball_optim_compilation():
+    try:
+        import heavyball
+
+        heavyball.utils.compile_mode = None
+    except ImportError:
+        pass
+
+
+_disable_heavyball_optim_compilation()

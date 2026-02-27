@@ -1,0 +1,127 @@
+defaults:
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+  - _self_
+
+model:
+  _target_: src.stage2.object_detection.model.mmdetect.factory.build_hybrid_model_from_yaml
+  model_type: rcnn
+  cfg_path: ${oc.env:MMDET_MODEL_CFG, ${hydra:runtime.cwd}/scripts/configs/object_detection/model/hybrid_mmdet_rcnn.yaml}
+  overrides:
+    num_classes: 20
+    input_channels: 3
+    tokenizer_pretrained_path: runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors
+    detector:
+      base_cfg:
+        model:
+          roi_head:
+            bbox_roi_extractor:
+              roi_layer:
+                use_torchvision: true
+    tokenizer_feature:
+      in_channels: 3
+      with_cp: true
+
+dataloader:
+  train:
+    _target_: src.stage2.object_detection.data.dior_mmdet.build_dataloader
+    dataset:
+      _target_: src.stage2.object_detection.data.dior_mmdet.DiorMMDetDataset
+      root: data/Downstreams/ObjectDetection/DIOR
+      split: train
+      target_size: 800
+      bbox_orientation: horizontal
+      use_obb: false
+      download: false
+      checksum: false
+      to_neg_1_1: true
+      is_train: true
+    batch_size: 4
+    num_workers: 6
+    shuffle: true
+  val:
+    _target_: src.stage2.object_detection.data.dior_mmdet.build_dataloader
+    dataset:
+      _target_: src.stage2.object_detection.data.dior_mmdet.DiorMMDetDataset
+      root: data/Downstreams/ObjectDetection/DIOR
+      split: test
+      target_size: 800
+      bbox_orientation: horizontal
+      use_obb: false
+      download: false
+      checksum: false
+      to_neg_1_1: true
+      is_train: false
+    batch_size: 6
+    num_workers: 4
+    shuffle: false
+
+optimizer:
+  # _target_: src.utilities.optim.muon_fused.MuonFSDP
+  # auto_split_muon_params: true
+  # oned_param_algo: lion
+  # ignored_keys_for_muon: []
+  # lr: 2e-4
+  # weight_decay: 0.05
+  # mu: 0.95
+  # betas: [0.9, 0.95]
+  # nesterov: true
+  # adjust_lr: rms_norm
+  # flatten: true
+  # use_triton: true
+  # use_preconditioned: false
+
+  type: AdamW
+  lr: 2e-4
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  weight_decay: 0.05
+
+paramwise_cfg:
+  norm_decay_mult: 0.0
+  bias_decay_mult: 0.0
+
+amp:
+  enabled: true
+  dtype: bfloat16
+  loss_scale: dynamic
+
+param_scheduler:
+  - type: LinearLR
+    start_factor: 0.1
+    by_epoch: false
+    begin: 0
+    end: 500
+  - type: CosineAnnealingLR
+    eta_min: 1.0e-5
+    by_epoch: true
+    begin: 0
+    end: 300
+    T_max: 300
+
+custom_hooks:
+  - _target_: src.stage2.object_detection.hooks.batch_debug_hook.DetectionBatchHook
+    dataset_tag: DIOR
+    log_once: true
+    log_input_shape: true
+    log_num_boxes: true
+  - _target_: src.stage2.object_detection.hooks.val_vis_hook.DetectionValVisHook
+    save_dir: vis
+    max_images: 16
+    score_thr: 0.5
+    draw_gt: true
+
+val_evaluator:
+  _target_: src.stage2.object_detection.metrics.map_metric.DetectionMAPMetric
+
+runner:
+  work_dir: runs/object_detection
+  max_epochs: 300
+  val_interval: 1
+  log_interval: 20
+  checkpoint_interval: 1
+  launcher: none
+  seed: 2026
+  do_val: true
+  resume: false
+  load_from: runs/object_detection/epoch_52.pth

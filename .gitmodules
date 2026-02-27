@@ -242,3 +242,9 @@
 [submodule "src/stage2/SSL_third_party/OmniSat"]
 	path = src/stage2/SSL_third_party/OmniSat
 	url = https://github.com/gastruc/OmniSat.git
+[submodule "src/stage1/cosmos/third_party/FlashWindowAttention"]
+	path = src/stage1/cosmos/third_party/FlashWindowAttention
+	url = https://github.com/zzd1992/FlashWindowAttention.git
+[submodule "src/stage1/cosmos/third_party/SwinTransformer"]
+	path = src/stage1/cosmos/third_party/SwinTransformer
+	url = https://github.com/microsoft/Swin-Transformer.git

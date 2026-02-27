@@ -26,8 +26,8 @@ ema:
 segment_loss:
   _target_: src.stage2.segmentation.loss.seg_loss.HyperSegmentationLoss
   ignore_index: 255
-  ce_weight: [1., 2.]
-  loss_weights: [0.5, 1.0, 0.1]
+  ce_weight: null
+  loss_weights: [0.0, 1.0, 0.0]
   mode: multiclass
 
 metric:
@@ -42,8 +42,8 @@ train:
   grad_check: false
   act_checkpoint: true
   val_slide_window_kwargs:
-    patch_size: 128
-    stride: 64
+    patch_size: 256
+    stride: 128
 
   use_single_img_indexing: false
   patches_per_image:
@@ -61,7 +61,7 @@ train:
   is_neg_1_1: true
 
   resume_path:
-  ema_load_path: #runs/stage2_CD_wrapper/2026-02-24_05-19-00_LEVIR_CD256_tokenizer_hybrid_adaptor/ema
+  ema_load_path: runs/stage2_CD_wrapper/2026-02-25_15-34-29_LEVIR_CD256_tokenizer_hybrid_adaptor/ema
 
   segment_optim:
     _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
@@ -70,11 +70,22 @@ train:
     oned_param_algo: lion
     use_triton: true
     muon_params_defaults:
-      lr: 4e-4
-      weight_decay: 0.01
-    oned_params_defaults:
       lr: 2e-4
+      weight_decay: 0.1
+    oned_params_defaults:
+      lr: 1e-4
       weight_decay: 0.0
+
+    #------------ only levir data ------
+                              # 87.74 87.78 88.17 88.62 88.77 89.01  # large network 4conv/4depth
+    # 81.72 84.18 85.70 86.336 87.08 87.55 88.25 88.14 88.28   # small network
+
+    # magma_kwargs:
+    #   mode: magma
+    #   survival_prob: 0.5
+    #   tau: 2.0
+    #   ema_beta: 0.9
+    #   seed: 42
 
   segment_sched:
     _target_: transformers.optimization.get_cosine_schedule_with_warmup

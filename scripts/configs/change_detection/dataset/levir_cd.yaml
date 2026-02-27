@@ -13,14 +13,14 @@ consts:
   changed_label: 1
 
 train:
-  _target_: src.stage2.change_detection.data.levir_cd.create_levir_cd_dataloader
+  _target_: src.stage2.change_detection.data.cd_basic.create_levir_cd_dataloader
   data_root: data/Downstreams/ChangeDetection/LEVIR-CD/LEVIR-CD256
-  split: trainval
+  split: test
   list_dir: list
   batch_size: ${dataset.train_bs}
   shuffle: true
   num_workers: 4
-  transform: default
+  transform: null
   normalize: true
   img_to_neg1_1: true
   label_threshold: 0
@@ -29,8 +29,21 @@ train:
   pin_memory: true
   drop_last: false
 
+  # _target_: src.stage2.change_detection.data.cd_basic.create_concat_cd_train_dataloader
+  # batch_size: ${dataset.train_bs}
+  # num_workers: 4
+  # dataset_names: [levir, s2looking, svcd, jl1]
+  # output_size: 256
+  # shuffle: true
+  # normalize: true
+  # img_to_neg1_1: true
+  # label_threshold: 0
+  # return_name: false
+  # pin_memory: true
+  # drop_last: false
+
 val:
-  _target_: src.stage2.change_detection.data.levir_cd.create_levir_cd_dataloader
+  _target_: src.stage2.change_detection.data.cd_basic.create_levir_cd_dataloader
   data_root: data/Downstreams/ChangeDetection/LEVIR-CD/LEVIR-CD256
   split: test
   list_dir: list
@@ -45,3 +58,18 @@ val:
   return_name: false
   pin_memory: true
   drop_last: false
+
+  # _target_: src.stage2.change_detection.data.cd_basic.create_levir_raw1024_test_dataloader
+  # batch_size: ${dataset.val_bs}
+  # data_root: data/Downstreams/ChangeDetection/LEVIR-CD/raw
+  # split: test
+  # shuffle: true
+  # num_workers: 2
+  # transform: null
+  # normalize: true
+  # img_to_neg1_1: true
+  # label_threshold: 0
+  # resize_to: null
+  # return_name: false
+  # pin_memory: true
+  # drop_last: false

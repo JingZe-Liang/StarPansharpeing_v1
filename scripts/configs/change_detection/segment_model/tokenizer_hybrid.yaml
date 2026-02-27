@@ -13,7 +13,7 @@ _target_: src.stage2.change_detection.models.tokenizer_backbone_adapted.Tokenize
 # Tokenizer Feature Configuration
 tokenizer_feature:
   pretrained_path: null
-  features_per_stage: [384, 384, 512, 512]
+  features_per_stage: [512, 512, 512, 512]
   model_name: hybrid_tokenizer_b16
   interaction_indexes: [1, 2, 4, 5]
   # encoder settings
@@ -27,13 +27,13 @@ tokenizer_feature:
   deform_ratio: 0.5
   add_vit_feature: true
   use_extra_extractor: true
-  with_cp: true
+  with_cp: false
 
 # Adapter Configuration
 adapter:
   adapter_type: default
   latent_width: 32
-  n_conv_per_stage: 2
+  n_conv_per_stage: 1
   depth_per_stage: 2
   norm: layernorm2d
   act: gelu
@@ -44,7 +44,7 @@ adapter:
 
 # Change Detection Stage Configuration
 cd_stage:
-  channels: [384, 384, 512, 512]
+  channels: [512, 512, 512, 512]
   stride: 1
   kernel_size: 3
   norm_layer: layernorm2d

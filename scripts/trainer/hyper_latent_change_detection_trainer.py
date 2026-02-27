@@ -382,7 +382,7 @@ class HyperCDTrainer:
         ):
 
             def _optimizer_creater(optimizer_cfg):
-                if "muon" in optimizer_cfg._target_:
+                if "muon" in optimizer_cfg._target_ or "magma" in optimizer_cfg._target_:
                     self.log_msg("[Optimizer]: using muon optimizer")
                     # is muon optimizer function
                     named_params = {k: v for k, v in self.model.named_parameters() if v.requires_grad}

@@ -30,8 +30,8 @@ segment_model:
 segment_loss:
   _target_: src.stage2.segmentation.loss.seg_loss.HyperSegmentationLoss
   ignore_index: 255
-  ce_weight: [1.0, 2.0]
-  loss_weights: [0.5, 3.0, 0.1]
+  ce_weight: null #[1.0, 1.0]
+  loss_weights: [0.0, 1.0, 0.0]
 
 metric:
   _target_: src.stage2.change_detection.metrics.basic.ChangeDetectionScore

@@ -1783,7 +1783,7 @@ class IJEPANaFlexViT(Transformer):
 
         return x
 
-    def forward(  # type: ignore[invalid-method-override]
+    def forward(
         self,
         x: torch.Tensor | dict[str, torch.Tensor],
         patch_coord: Optional[torch.Tensor] = None,

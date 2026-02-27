@@ -151,18 +151,23 @@ def _filter_labels(labels: Any, mask: torch.Tensor) -> Any:
 
 
 def build_default_transforms(
-    target_size: int = 512, to_neg_1_1: bool = False
+    target_size: int = 512, to_neg_1_1: bool = False, is_train: bool = True
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    """Build a default transformer that uses square RandomResizedCrop on image and boxes."""
+    """Build default detection transforms for train/val."""
 
     def _build_aug(keys: list[DataKey]) -> K.AugmentationSequential:
-        return K.AugmentationSequential(
-            K.RandomResizedCrop(
+        aug: Any
+        if is_train:
+            aug = K.RandomResizedCrop(
                 (target_size, target_size),
                 scale=(0.9, 1.0),
                 ratio=(1.0, 1.0),
                 p=1.0,
-            ),
+            )
+        else:
+            aug = K.Resize((target_size, target_size), p=1.0)
+        return K.AugmentationSequential(
+            aug,
             data_keys=keys,
             same_on_batch=True,
         )

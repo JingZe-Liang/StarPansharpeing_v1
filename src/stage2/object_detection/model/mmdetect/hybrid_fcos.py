@@ -133,7 +133,7 @@ else:
 def _create_default_cfg() -> DictConfig:
     cfg = _create_default_backbone_cfg()
     # A more typical detection stride setup. Override freely.
-    cfg.encoder_feature_strides = [4, 8, 16, 32]
+    cfg.encoder_feature_strides = [1, 2, 4, 8]
     cfg.feature_strides = [2, 4, 8, 16]
 
     cfg.detector = OmegaConf.create()

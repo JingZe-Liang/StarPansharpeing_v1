@@ -18,7 +18,6 @@ from src.stage2.segmentation.models.tokenizer_backbone_adapted import (
 from src.utilities.config_utils import function_config_to_basic_types
 
 logger = logger.bind(_name_="hybrid_det_backbone")
-logger.disable("src.stage1")
 
 
 def _create_default_cfg() -> DictConfig:
@@ -112,7 +111,7 @@ def _create_default_cfg() -> DictConfig:
     tokenizer_pretrained_path: null
     input_channels: ${tokenizer_feature.in_channels}
     feature_keys: [res2, res3, res4, res5]
-    encoder_feature_strides: [4, 8, 16, 32]
+    encoder_feature_strides: [1, 2, 4, 8]
     feature_strides: [2, 4, 8, 16]
     fpn_out_features: [p2, p3, p4, p5]
     fpn_out_channels: 256

@@ -178,6 +178,28 @@ def make_block_fn(
                 **kwargs,
             )
 
+    elif block_name == "swin_block":
+        from .swin_op import SwinTransformerBlock
+        from .variants.mlp import SwiGLU
+
+        def block_fn(block_in, block_out, dropout, curr_res):
+            assert curr_res is not None
+
+            return SwinTransformerBlock(
+                dim=block_in,
+                out_dim=block_out,
+                input_resolution=curr_res,
+                num_heads=kwargs.get("num_heads", 8),
+                window_size=kwargs.get("window_size", 7),
+                shift_size=kwargs.get("shift_size", 0),
+                mlp_ratio=kwargs.get("mlp_ratio", 4),
+                qkv_bias=kwargs.get("qkv_bias", True),
+                qk_scale=kwargs.get("qk_scale", None),
+                attn_backend=kwargs.get("attn_backend", "triton_v3"),
+                window_backend=kwargs.get("window_backend", "triton"),
+                mlp_cls=SwiGLU,
+            )
+
     else:
         raise ValueError(
             f"block_name {block_name} is not supported. Supported: 'res_block', 'res_moe', 'dico_block', 'convnext'"

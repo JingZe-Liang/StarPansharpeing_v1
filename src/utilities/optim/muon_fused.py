@@ -274,7 +274,7 @@ class MuonFSDP(Muon):
         dd = {}
         if "magma_kwargs" in support_kwargs:
             dd |= {"magma_kwargs": magma_kwargs}
-        else:
+        elif magma_kwargs is not None:
             logger.warning("[MuonFused]: magma_kwargs is not supported by the current version of Dion verson.")
 
         super().__init__(

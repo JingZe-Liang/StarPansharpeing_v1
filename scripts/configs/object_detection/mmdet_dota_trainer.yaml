@@ -1,7 +1,12 @@
+defaults:
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+  - _self_
+
 model:
   _target_: src.stage2.object_detection.model.mmdetect.factory.build_hybrid_model_from_yaml
-  model_type: fcos
-  cfg_path: ${oc.env:MMDET_MODEL_CFG, ${hydra:runtime.cwd}/scripts/configs/object_detection/model/hybrid_mmdet_fcos.yaml}
+  model_type: rcnn
+  cfg_path: ${oc.env:MMDET_MODEL_CFG, ${hydra:runtime.cwd}/scripts/configs/object_detection/model/hybrid_mmdet_rcnn.yaml}
   overrides:
     num_classes: 18
     input_channels: 3
@@ -19,8 +24,8 @@ dataloader:
       bbox_orientation: horizontal
       target_size: 512
       use_obb: false
-    batch_size: 2
-    num_workers: 2
+    batch_size: 8
+    num_workers: 4
     shuffle: true
   val:
     _target_: src.stage2.object_detection.data.dota_mmdet.build_dataloader
@@ -32,14 +37,34 @@ dataloader:
       bbox_orientation: horizontal
       target_size: 512
       use_obb: false
-    batch_size: 2
+    batch_size: 8
     num_workers: 2
     shuffle: false
 
 optimizer:
   type: AdamW
-  lr: 1e-4
+  lr: 3e-4
   weight_decay: 0.05
+
+param_scheduler:
+  - type: LinearLR
+    start_factor: 0.1
+    by_epoch: false
+    begin: 0
+    end: 500
+  - type: CosineAnnealingLR
+    eta_min: 1.0e-6
+    by_epoch: true
+    begin: 0
+    end: 12
+    T_max: 12
+
+custom_hooks:
+  - _target_: src.stage2.object_detection.hooks.batch_debug_hook.DetectionBatchHook
+    dataset_tag: DOTA
+    log_once: true
+    log_input_shape: true
+    log_num_boxes: true
 
 runner:
   work_dir: output/mmdet_dota

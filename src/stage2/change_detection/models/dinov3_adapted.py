@@ -234,7 +234,7 @@ class LatentSpectralStage(nn.Module):
         return outs
 
 
-# * --- Multispectral CD Attention and Mlp --- #
+# --- Multispectral CD Attention and Mlp --- #
 
 
 class MultiSpectralCDStageWithDinoSkips(nn.Module):
@@ -315,7 +315,7 @@ class MultiSpectralCDStageWithDinoSkips(nn.Module):
         return skips_new
 
 
-# * --- Dino backbone change detection network --- #
+# --- Dino backbone change detection network --- #
 
 
 class DinoUNet(nn.Module):

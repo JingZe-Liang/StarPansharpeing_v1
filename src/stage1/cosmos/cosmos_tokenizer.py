@@ -262,6 +262,7 @@ class ContinuousImageTokenizer(nn.Module):
         self._hook_module = cfg.hook_module
         self._vf_on_z_or_module = cfg.vf_on_z_or_module
         self._dino_feature_dim = cfg.dino_feature_dim
+
         # latent noise probability (fix field name typo: latent_noise_prob)
         self.latent_noise_prob = cfg.latent_noise_prob
         self.latent_noise_type = cfg.latent_noise_type
@@ -307,7 +308,8 @@ class ContinuousImageTokenizer(nn.Module):
         if cfg.loading_type == "nvidia":
             assert enc_path is not None and dec_path is not None
             assert enc_path.endswith(".jit") and dec_path.endswith(".jit")
-            # pretrained model from NVIDIA cosmos tokenizer
+
+            # pretrained model
             assert not self.norm_in_quant_conv, (
                 "norm_in_quant_conv is not supported for nvidia pretrained model settings, trian it from scratch"
             )
@@ -999,7 +1001,6 @@ class ContinuousImageTokenizer(nn.Module):
             return None
 
         ######## load NVIDIA Cosmos separated encoder, decoder checkpoints
-
         if self.loading_type == "nvidia":
             assert tokenizer_cfg is not None, "tokenizer_cfg is required when loading the nvidia pretrained tokenizer"
             logger.info(f"Loading pretrained encoder from {enc_path} for NVIDIA pretrained model")
@@ -1026,7 +1027,6 @@ class ContinuousImageTokenizer(nn.Module):
             return encoder, decoder
 
         ####### load pretrained uni-tokenizer or separate encoder and decoder
-
         else:
             if uni_tokenizer_path != "" or uni_tokenizer_path is not None:
                 logger.info(f"Loading pretrained encoder from {uni_tokenizer_path} for pretrained model")

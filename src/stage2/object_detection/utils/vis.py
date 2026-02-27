@@ -23,6 +23,10 @@ def _to_pil_image(image: Any) -> Any:
         raise ImportError("vis requires numpy when input is not a PIL image.") from exc
     if hasattr(image, "detach"):
         image = image.detach().cpu().numpy()
+    image_min = float(image.min()) if hasattr(image, "min") else 0.0
+    image_max = float(image.max()) if hasattr(image, "max") else 1.0
+    if image_min < -0.01:
+        image = (image + 1.0) / 2.0
     image = image * 255.0
     if image.ndim == 3 and image.shape[0] in {1, 3}:
         image = image.transpose(1, 2, 0)

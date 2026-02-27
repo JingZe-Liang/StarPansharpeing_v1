@@ -40,6 +40,19 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.models.siglip2.modeling_siglip2 import Siglip2VisionTransformer
 
+from ..distill.phi_s import MultiLayersPhiSDistillLoss
+from ..distill.hadamard import get_hadamard_matrix
+from ..distill.teachers import (
+    build_teacher_adapter,
+    ensure_feature_list,
+    load_perception_model as _load_perception_model_impl,
+    load_repa_dino_v2_model as _load_repa_dino_v2_model_impl,
+    load_repa_dino_v3_model as _load_repa_dino_v3_model_impl,
+    load_repa_encoder as _load_repa_encoder_impl,
+    load_siglip2_model as _load_siglip2_model_impl,
+    patch_siglip_processor as _siglip_processor_patcher_impl,
+)
+
 from src.stage1.utilities.losses.gan_loss.utils import get_rgb_channels_for_model
 from src.stage1.utilities.losses.repa.feature_pca import (
     feature_pca_sk,
@@ -47,6 +60,7 @@ from src.stage1.utilities.losses.repa.feature_pca import (
 )
 from src.utilities.train_utils import time_recorder
 from src.utilities.config_utils import function_config_to_basic_types
+
 
 # Dino collections
 DINOV3_TO_NUM_LAYERS = {
@@ -861,6 +875,15 @@ def load_repa_encoder(
         raise ValueError(f"Unknown DINO/PE version {repa_name}")
 
 
+# Rebind legacy helper names to the shared teacher adapter implementations.
+load_perception_model = _load_perception_model_impl
+load_repa_dino_v3_model = _load_repa_dino_v3_model_impl
+load_repa_dino_v2_model = _load_repa_dino_v2_model_impl
+load_siglip2_model = _load_siglip2_model_impl
+_siglip_processor_patcher = _siglip_processor_patcher_impl
+load_repa_encoder = _load_repa_encoder_impl
+
+
 # *==============================================================
 # * Loss modules
 # *==============================================================
@@ -934,44 +957,26 @@ class REPALoss(torch.nn.Module):
         self.dino_type = dino_load_type
         self.repa_model_name = repa_model_name
         self.repa_model_type = repa_model_type
-
-        if repa_encoder is not None:
-            self.repa_encoder = repa_encoder
-        else:
-            if dino_version == 3:
-                self.dino_type = "torch"
-            load_kwargs = dict(
-                repa_name=repa_model_type,
-                model_name=repa_model_name,
-                weight_path=repa_model_load_path,
-                load_from=dino_load_type,
-                dino_v3_pretrained_on=dino_pretrained_on,
-                compile=False,
-            )
-            self.repa_model_name = repa_model_name
-
-            # Load the repa encoder
-            repa_encoder = load_repa_encoder(**load_kwargs)  # ty: ignore[invalid-argument-type]
-
-            # Image processor for Siglip2
-            if isinstance(repa_encoder, tuple):
-                self.repa_encoder = repa_encoder[0]
-                processor = repa_encoder[1]
-                # do resize in the processor
-                max_n_patches = (repa_img_size // 16) ** 2
-                self.processor = _siglip_processor_patcher(
-                    processor,
-                    interp_pe=False,
-                    # size=(dino_img_size, dino_img_size),
-                    max_num_patches=max_n_patches,
-                )
-            else:
-                self.repa_encoder = repa_encoder
-
-            self.repa_encoder.image_size = repa_img_size  # ty: ignore[invalid-assignment]
-            self.repa_encoder = self.repa_encoder.to(dtype)
-            self.repa_encoder.requires_grad_(False)
-            self.repa_encoder.eval()
+        if dino_version == 3:
+            self.dino_type = "torch"
+        self.teacher_adapter = build_teacher_adapter(
+            repa_model_type=repa_model_type,
+            repa_model_name=repa_model_name,
+            repa_model_load_path=repa_model_load_path,
+            repa_encoder=repa_encoder,
+            dino_load_type=self.dino_type,
+            dino_pretrained_on=cast(Literal["satellite", "web"], dino_pretrained_on),
+            c_dim_first=c_dim_first,
+            img_is_neg1_1=img_is_neg1_1,
+            rgb_channels=cast(list[int] | str | None, rgb_channels),
+            img_resize=cast(tuple[int, int] | str | None, img_resize),
+            repa_img_size=repa_img_size,
+            dtype=dtype,
+            pca_fn=feature_pca_torch if rgb_channels == "pca" else None,
+        )
+        self.repa_encoder = self.teacher_adapter.encoder
+        if getattr(self.teacher_adapter, "processor", None) is not None:
+            self.processor = self.teacher_adapter.processor
 
         logger.info("[REPA Loss]: load pretrained dino visual foundation model done")
         self.c_dim_first = c_dim_first
@@ -995,16 +1000,6 @@ class REPALoss(torch.nn.Module):
             self.projector = nn.Identity()
 
         self.img_is_neg1_1 = img_is_neg1_1
-        if self.repa_model_type == "pe":
-            self.normalize = Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        elif self.repa_model_type == "dinov3" and dino_pretrained_on == "satellite":
-            # dinov3 satellite nromalization mean/std.
-            self.normalize = Normalize(
-                mean=(0.430, 0.411, 0.296),
-                std=(0.213, 0.156, 0.143),
-            )
-        else:
-            self.normalize = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
 
     def _get_encoder(self):
         """Unwrap compiled model to access original attributes."""
@@ -1026,218 +1021,13 @@ class REPALoss(torch.nn.Module):
             + f"    build_proj: {self.build_proj}"
         )
 
-    def _norm_img_before_repa(self, img):
-        if self.img_is_neg1_1:
-            img = (img + 1) / 2
-
-        # norm, image dim must be 4d
-        assert img.ndim == 4 and img.shape[1] == 3, "img dim must be 4d and have 3 channels"
-        img = self.normalize(img)
-        return img
-
     def _forward_features(self, x: BatchFeature | Tensor, get_interm_feats=False, detach=True, **kwargs):
-        if self.repa_model_type == "siglip2":
-            return self._forward_siglip_features(x, get_interm_feats, detach=detach)
-        elif self.repa_model_type in ("dinov2", "dinov3"):
-            assert is_tensor(x), "inputs must be a tensor for DINOv2/v3 model"
-            return self._forward_dino_features(x, get_interm_feats, detach=detach, **kwargs)
-        elif self.repa_model_type == "pe":
-            return self._forward_pe_features(x, get_interm_feats, detach=detach)
-        else:
-            raise ValueError(f"Unknown model type: {self.repa_model_type}")
-
-    @torch.autocast("cuda", torch.bfloat16)
-    def _forward_siglip_features(self, inputs, get_interm_feats=False, detach=True):
-        assert self.repa_model_type == "siglip2", "repa mode type should be 'siglip2' when using Siglip2 model"
-
-        # image is the output of the processor
-        _is_naflex = False
-        if "spatial_shapes" in inputs:
-            shapes = inputs["spatial_shapes"]  # (bs, 2)
-            _is_naflex = True
-        else:
-            shapes = inputs["pixel_values"].shape  # (bs, c, h, w)
-        # All to cuda
-        inputs = inputs.to("cuda")
-        # Add inputs `output_hidden_states`=True if get_interm_feats
-        inputs["output_hidden_states"] = get_interm_feats
-        model_out_ = self.repa_encoder(**inputs)  # Tensor (bs, n, c) or (bs, c, h, w)
-
-        out_feats: Tensor | list[Tensor]
+        _ = kwargs
+        x_in = cast(Tensor | dict[str, Tensor], x)
+        feats = self.teacher_adapter.forward_features(x_in, get_interm_feats=get_interm_feats, detach=detach)
         if get_interm_feats:
-            out_feats = model_out_.hidden_states  # list of Tensor
-        else:
-            out_feats = model_out_.last_hidden_state  # Tensor
-        assert out_feats is not None, "Can not get features from Siglip2 model"
-
-        n_feats = 1
-        if isinstance(out_feats, list):
-            n_feats = len(out_feats)
-
-        # Post-processing
-        # Per-tensor process
-        bs = inputs["pixel_values"].shape[0]
-
-        def _per_tensor_process(feat: Tensor) -> Tensor:
-            if _is_naflex:
-                feat_valid = []
-                for i in range(bs):
-                    # Usually, the batch of tensor has the same shape and
-                    # valid length, but in general, we keep the for-loop
-                    s = shapes[i]  # (2,): mean h, w
-                    n_patches_i = s.prod().item()
-                    h_sample = feat[i, :n_patches_i].view(1, *s, -1).permute(0, 3, 1, 2)  # (1, c, h, w)
-                    feat_valid.append(h_sample)  # 2d feature
-                # Stack back to a tensor
-                # FIXME: may raise if the batch image is not the same size
-                feat = torch.cat(feat_valid, dim=0)  # (bs, c, h, w)
-            else:
-                # assert feat.ndim == 4, f"Siglip2 (not naflex version) output feature must be 4d but got {feat.ndim}d"
-                if feat.ndim == 3:
-                    # Reshape back to 2d
-                    # TODO: check if is square?
-                    h = w = int(math.sqrt(feat.shape[1]))
-                    feat = rearrange(feat, "b (h w) c -> b c h w", h=h, w=w)
-            return feat
-
-        if get_interm_feats:
-            # is a list of features
-            img_feats = [_per_tensor_process(feat) for feat in out_feats]  # 2d list features
-        else:
-            out_feats = cast(Tensor, out_feats)
-            img_feats = _per_tensor_process(out_feats)  # 2d features
-
-        # Detach and return 1 feature out?
-        if isinstance(img_feats, list) and len(img_feats) == 1:
-            img_feats = img_feats[-1]
-        elif isinstance(img_feats, Tensor):
-            pass
-
-        # else:  # is a list of Tensors
-        #     # Stack the Siglip2 features
-        #     img_feats = torch.stack(img_feats, dim=0)  # [4, B, C, H, W]
-
-        return img_feats
-
-    @torch.autocast("cuda", torch.bfloat16)
-    def _forward_dino_features(self, img, get_interm_feats=False, detach=True) -> Tensor | list[Tensor]:
-        img = self._to_dtensor(img)
-
-        if self.dino_type == "torch":
-            # if not self.c_dim_first:  # distill for vit 1d features
-            #     img_feats = self.repa_encoder.forward_features(img)[  # type: ignore
-            #         "x_norm_patchtokens"
-            #     ]  # (bs, 256, 768)
-            # else:  # distill for cnn 2d features
-            layers_to_take = DINOv3_INTERACTION_INDEXES.get(self.repa_model_name, 1) if get_interm_feats else 1
-            img_feats = self.repa_encoder.get_intermediate_layers(  # type: ignore
-                img, n=layers_to_take, reshape=self.c_dim_first, norm=True
-            )  # the last layer feature
-            if len(img_feats) == 1:
-                img_feats = img_feats[0]
-        elif self.dino_type == "timm":
-            b, c, h, w = img.shape
-            assert h % 16 == 0 and w % 16 == 0, "image size must be divisible by 16"
-            img_feats = (
-                self.repa_encoder.forward_features(img)[:, 1:]  # type: ignore
-                .reshape(b, h // 16, w // 16, -1)
-                .permute(0, 3, 1, 2)
-            )  # (bs, c, h, w)
-        else:
-            raise ValueError(f"Unknown model type: {self.dino_type}. Must be 'torch', 'timm', or 'siglip2'")
-
-        # Dtensor to Tensor
-        if isinstance(img_feats, DTensor):
-            img_feats = img_feats.full_tensor()
-        elif is_list_tuple(img_feats) and isinstance(img_feats[0], DTensor):
-            img_feats = list(img_feats)
-            for i, img_feat in enumerate(img_feats):
-                img_feats[i] = img_feat.full_tensor()
-
-        # Detach all tensors
-        if detach:
-            if is_tensor(img_feats):
-                img_feats = img_feats.detach()
-            elif is_list_tuple(img_feats):
-                img_feats = [f.detach() for f in img_feats]
-
-        # if get_interm_feats:
-        #     # Stack all features
-        #     assert isinstance(img_feats, (tuple, list)), (
-        #         "img_feats must be a list when get_interm_feats is True"
-        #     )
-        #     img_feats = torch.stack(img_feats, dim=0)  # [4, B, C, H, W]
-
-        return img_feats
-
-    def _forward_pe_features(self, img, get_interm_feats=False, detach=True):
-        assert self.repa_model_type == "pe", f'repa model type should be "pe" when using Perception Encoder model'
-        img = self._to_dtensor(img)
-
-        encoder = self._get_encoder()
-        n_layers = int(getattr(encoder, "layers"))
-        if get_interm_feats:
-            layers_to_take: int | list[int] = _pe_interaction_indexes_for_model(self.repa_model_name, n_layers=n_layers)
-        else:
-            layers_to_take = -1
-
-        try:
-            out_feats = self.repa_encoder.forward_features(  # type: ignore
-                img, layer_idx=layers_to_take, strip_cls_token=True, norm=True
-            )
-        except TypeError as e:
-            if not (get_interm_feats and isinstance(layers_to_take, list)):
-                raise
-            logger.warning(
-                f"[PE Model]: forward_features does not support list layer_idx, falling back to per-layer calls: {e}"
-            )
-            out_feats = [
-                self.repa_encoder.forward_features(  # type: ignore
-                    img, layer_idx=layer_idx, strip_cls_token=True, norm=True
-                )
-                for layer_idx in layers_to_take
-            ]
-
-        # All to 2d features
-        ps = encoder.patch_size
-        h, w = img.shape[2] // ps, img.shape[3] // ps
-        if is_list_tuple(out_feats):
-            out_feats = [rearrange(f, "b (h w) c -> b c h w", h=h, w=w) for f in out_feats]
-        else:
-            out_feats = rearrange(out_feats, "b (h w) c -> b c h w", h=h, w=w)
-
-        # Detach all tensors
-        if detach:
-            if is_tensor(out_feats):
-                out_feats = out_feats.detach()
-            elif is_list_tuple(out_feats):
-                out_feats = [f.detach() for f in out_feats]
-
-        return out_feats
-
-    def _resize_img(self, img, size) -> Tensor:
-        assert img.shape[1] == 3, f"img must be rgb images but got image shaped as {img.shape}"
-
-        # Unwrap compiled model to access attributes
-        encoder = self._get_encoder()
-
-        # resize images
-        if tuple([encoder.image_size] * 2) != size:
-            if self.img_resize == "dino":  # to 224 x 224 pretrained size
-                tgt_size: int | tuple[int, int] = int(encoder.image_size)
-            elif isinstance(self.img_resize, (tuple, list)):
-                assert len(self.img_resize) == 2, "img_resize must be 2d tuple"
-                tgt_size = (int(self.img_resize[0]), int(self.img_resize[1]))
-            else:
-                tgt_size = (
-                    next_divisble_of_y(img.shape[-2], encoder.patch_size),
-                    next_divisble_of_y(img.shape[-1], encoder.patch_size),
-                )
-                logger.warning("[Repa Resize]: image not resize into dino pretrained size")
-            img = F.interpolate(img, size=tgt_size, mode="bilinear", align_corners=False)
-
-        img = self._norm_img_before_repa(img)
-        return img
+            return feats
+        return feats[0]
 
     @time_recorder.record("repa_encode_img")
     @torch.no_grad()
@@ -1248,59 +1038,17 @@ class REPALoss(torch.nn.Module):
         use_linstretch=True,
         detach=True,
     ):
-        img_size = tuple(img.shape[-2:])
-        bs = img.shape[0]
         assert img.ndim == 4, f"img must be 4d tensor but got {img.ndim}d"
-
-        # Use the reusable function to handle RGB channel selection
-        img = get_rgb_channels_for_model(
-            rgb_channels=self.rgb_channels,
-            img=img,
-            use_linstretch=use_linstretch,  # Keep original behavior without linear stretching
-            pca_fn=feature_pca_torch if self.rgb_channels == "pca" else None,
+        feats = self.teacher_adapter.encode(
+            img,
+            get_interm_feats=get_interm_feats,
+            use_linstretch=use_linstretch,
+            detach=detach,
+            repa_fixed_bs=self.repa_fixed_bs,
         )
-
-        # Resize image / Preprocess image
-        inputs = None
-        if hasattr(self, "processor"):  # Siglip2 processor
-            if self.img_is_neg1_1:
-                img = (img + 1) / 2
-            # must make sure is [0, 1]
-            img = img.clamp(0, 1)
-            # make 1d patches nor downsample by AutoProcessor
-            inputs = self.processor(images=img)
-        else:
-            inputs = self._resize_img(img, img_size)
-
-        # loop to get the features
-        if self.repa_fixed_bs is None or bs < self.repa_fixed_bs:
-            img_feats = self._forward_features(
-                inputs,
-                detach=detach,
-                get_interm_feats=get_interm_feats,
-            )
-        else:
-            # TODO: add support for siglip2
-            assert self.dino_type != "siglip2", "Siglip2 model does not support fixed batch size inference"
-
-            # macro-batch-size inference
-            assert self.repa_fixed_bs is not None, "repa_fixed_bs must not be None in macro-batch inference branch"
-            img_feats_chunks: list[Tensor | list[Tensor]] = []
-            for i in range(0, img.shape[0], self.repa_fixed_bs):
-                img_mb = img[i : i + self.repa_fixed_bs]
-                img_feats_chunks.append(
-                    self._forward_features(img_mb, get_interm_feats=get_interm_feats, detach=detach)
-                )
-
-            first_chunk = img_feats_chunks[0]
-            if is_list_tuple(first_chunk):
-                chunk_lists = cast(list[list[Tensor]], img_feats_chunks)
-                n_feats = len(chunk_lists[0])
-                img_feats = [torch.cat([chunk[i] for chunk in chunk_lists], dim=0) for i in range(n_feats)]
-            else:
-                img_feats = torch.cat(cast(list[Tensor], img_feats_chunks), dim=0)
-
-        return img_feats
+        if get_interm_feats:
+            return feats
+        return feats[0]
 
     @overload
     def _interp_teacher_or_student_features(
@@ -1316,20 +1064,19 @@ class REPALoss(torch.nn.Module):
         self, teacher_feat: Tensor | list[Tensor], student_feat: Tensor | list[Tensor]
     ):
         # Feature list or stacked feature
-        is_t_feat_lst = is_list_tuple(teacher_feat) or teacher_feat.ndim == 5
-        is_s_feat_lst = is_list_tuple(student_feat) or student_feat.ndim == 5
+        is_t_stacked = is_tensor(teacher_feat) and teacher_feat.ndim == 5
+        is_s_stacked = is_tensor(student_feat) and student_feat.ndim == 5
+        is_s_feat_lst = is_list_tuple(student_feat) or is_s_stacked
+        is_t_feat_lst = is_list_tuple(teacher_feat) or is_t_stacked
         is_feat_lst = is_t_feat_lst and is_s_feat_lst
-        is_s_stacked = is_t_stacked = False
 
         if is_feat_lst:
             assert len(teacher_feat) == len(student_feat), (
                 f"len(teacher_feat) != len(student_feat), {len(teacher_feat)=}, {len(student_feat)=}"
             )
-            assert (
-                (is_feat_stacked := is_tensor(teacher_feat))
-                and (is_feat_stacked := is_tensor(student_feat))
-                or (is_list_tuple(teacher_feat) and is_list_tuple(student_feat))
-            ), "all list features or all stacked features"
+            assert (is_t_stacked and is_s_stacked) or (is_list_tuple(teacher_feat) and is_list_tuple(student_feat)), (
+                "all list features or all stacked features"
+            )
         is_feat_stacked = is_s_stacked and is_t_stacked
 
         # Match teacher features to student features
@@ -1382,6 +1129,8 @@ class REPALoss(torch.nn.Module):
     def repa_loss(self, teacher_feat: Tensor | list[Tensor], student_feat: Tensor | list[Tensor]):
         # [bs, l, c] or [bs, c, h, w]
         # 1. interpolate
+        teacher_feat = ensure_feature_list(teacher_feat)
+        student_feat = ensure_feature_list(student_feat)
         teacher_feat, student_feat = self._interp_teacher_or_student_features(  # type: ignore
             teacher_feat, student_feat
         )
@@ -1418,8 +1167,8 @@ class REPALoss(torch.nn.Module):
             student_feat = norm_feature(student_feat, dim=dim, norm_type=self.feature_normalize)
 
         # Shape assertion
-        _assertion_msg = (
-            lambda tf, sf: f"img_feat and model_feat must have the same shape to compute the repa loss, "
+        _assertion_msg = lambda tf, sf: (
+            f"img_feat and model_feat must have the same shape to compute the repa loss, "
             f"but got {tuple(tf.shape)} and {tuple(sf.shape)}"
         )
         if isinstance(teacher_feat, Tensor) and isinstance(student_feat, Tensor):
@@ -1500,6 +1249,216 @@ class REPALoss(torch.nn.Module):
             img = DTensor.from_local(img, dm, placements=(Shard(0),))  # ty: ignore[invalid-argument-type]
 
         return img
+
+
+class PhiSMultipleTeacherDistillLoss(nn.Module):
+    def __init__(
+        self,
+        *,
+        teacher_configs: dict[str, dict[str, Any]],
+        teacher_dims: dict[str, list[int]],
+        teacher_weights: dict[str, float] | None = None,
+        layer_weights: dict[str, list[float]] | None = None,
+        c_dim_first: bool = True,
+        img_is_neg1_1: bool = True,
+        rgb_channels: list[int] | Literal["random", "mean", "largest"] | str | None = None,
+        img_resize: Literal["dino"] | tuple[int, int] | int | None = "dino",
+        feature_resample_type: Literal["match_teacher", "match_student"] = "match_student",
+        dtype: torch.dtype = torch.bfloat16,
+        repa_fixed_bs: int | None = None,
+        repa_img_size: int = 224,
+        dino_load_type: Literal["torch", "timm"] = "torch",
+        dino_pretrained_on: Literal["satellite", "web"] = "satellite",
+        phi_loss_type: Literal["mse", "smoothl1"] = "mse",
+        phi_eps: float = 1e-6,
+        hadamard_allow_approx: bool = True,
+    ) -> None:
+        super().__init__()
+        if len(teacher_configs) == 0:
+            raise ValueError("teacher_configs must not be empty")
+        if len(teacher_dims) == 0:
+            raise ValueError("teacher_dims must not be empty")
+
+        if isinstance(img_resize, int):
+            img_resize = (img_resize, img_resize)
+
+        self.c_dim_first = c_dim_first
+        self.feature_resample_type = feature_resample_type
+        self.repa_fixed_bs = repa_fixed_bs
+        self.teacher_dims = {k: list(v) for k, v in teacher_dims.items()}
+
+        hadamard_fn = lambda n, device=None, dtype=None: get_hadamard_matrix(  # noqa: E731
+            n,
+            allow_approx=hadamard_allow_approx,
+        ).to(device=device, dtype=dtype)
+        self.phi_loss = MultiLayersPhiSDistillLoss(
+            teacher_dims=self.teacher_dims,
+            hadamard_fn=hadamard_fn,
+            loss_type=phi_loss_type,
+            eps=phi_eps,
+            teacher_weights=teacher_weights,
+            layer_weights=layer_weights,
+        )
+
+        adapters: dict[str, Any] = {}
+        encoder_modules: dict[str, nn.Module] = {}
+        for teacher_name, cfg in teacher_configs.items():
+            cfg_local = dict(cfg)
+            repa_model_type = str(cfg_local.pop("repa_model_type", "dinov3"))
+            repa_model_name = str(cfg_local.pop("repa_model_name", "dinov3_vitl16"))
+            repa_model_load_path = cfg_local.pop("repa_model_load_path", None)
+            repa_encoder = cfg_local.pop("repa_encoder", None)
+            teacher_dino_load_type = str(cfg_local.pop("dino_load_type", dino_load_type))
+            teacher_dino_pretrained_on = str(cfg_local.pop("dino_pretrained_on", dino_pretrained_on))
+            teacher_rgb_channels = cfg_local.pop("rgb_channels", rgb_channels)
+            teacher_img_resize = cfg_local.pop("img_resize", img_resize)
+            teacher_img_is_neg1_1 = bool(cfg_local.pop("img_is_neg1_1", img_is_neg1_1))
+            teacher_repa_img_size = int(cfg_local.pop("repa_img_size", repa_img_size))
+            teacher_dtype = cfg_local.pop("dtype", dtype)
+
+            adapter = build_teacher_adapter(
+                repa_model_type=repa_model_type,
+                repa_model_name=repa_model_name,
+                repa_model_load_path=repa_model_load_path,
+                repa_encoder=repa_encoder,
+                dino_load_type=teacher_dino_load_type,
+                dino_pretrained_on=cast(Literal["satellite", "web"], teacher_dino_pretrained_on),
+                c_dim_first=c_dim_first,
+                img_is_neg1_1=teacher_img_is_neg1_1,
+                rgb_channels=cast(list[int] | str | None, teacher_rgb_channels),
+                img_resize=cast(tuple[int, int] | str | None, teacher_img_resize),
+                repa_img_size=teacher_repa_img_size,
+                dtype=cast(torch.dtype, teacher_dtype),
+                pca_fn=feature_pca_torch if teacher_rgb_channels == "pca" else None,
+            )
+            adapters[teacher_name] = adapter
+            encoder_modules[teacher_name] = adapter.encoder
+
+        if set(adapters.keys()) != set(self.teacher_dims.keys()):
+            raise ValueError(
+                f"teacher_configs keys {sorted(adapters.keys())} must match teacher_dims keys {sorted(self.teacher_dims.keys())}"
+            )
+
+        self.teacher_adapters = adapters
+        self.teacher_encoders = nn.ModuleDict(encoder_modules)
+        self.teacher_processors: dict[str, Any] = {
+            key: adapter.processor for key, adapter in self.teacher_adapters.items() if adapter.processor is not None
+        }
+
+    def _interp_teacher_or_student_features(
+        self,
+        teacher_feat: list[Tensor],
+        student_feat: list[Tensor],
+    ) -> tuple[list[Tensor], list[Tensor]]:
+        if len(teacher_feat) != len(student_feat):
+            if len(teacher_feat) > len(student_feat):
+                teacher_feat = teacher_feat[-len(student_feat) :]
+            else:
+                raise ValueError(
+                    f"Teacher/student layer count mismatch: teacher={len(teacher_feat)}, student={len(student_feat)}"
+                )
+
+        if self.feature_resample_type == "match_student":
+
+            def _interp_feat_match_stu(t_feat: Tensor, s_feat: Tensor) -> Tensor:
+                st_ndim = s_feat.ndim
+                if st_ndim == 3:
+                    return interpolate_features_1d(t_feat, s_feat.shape[-2])
+                if st_ndim == 4:
+                    return interpolate_features_2d(t_feat, s_feat.shape[-2:])
+                raise ValueError(f"student feature must be 1d or 2d, got ndim={st_ndim}")
+
+            teacher_feat = [
+                _interp_feat_match_stu(t_feat, s_feat) for t_feat, s_feat in zip(teacher_feat, student_feat)
+            ]
+        else:
+
+            def _interp_feat_match_tch(t_feat: Tensor, s_feat: Tensor) -> Tensor:
+                if t_feat.ndim == 3:
+                    return interpolate_features_1d(s_feat, t_feat.shape[-2])
+                if t_feat.ndim == 4:
+                    return interpolate_features_2d(s_feat, t_feat.shape[-2:])
+                raise ValueError(f"teacher feature must be 1d or 2d, got ndim={t_feat.ndim}")
+
+            student_feat = [
+                _interp_feat_match_tch(t_feat, s_feat) for t_feat, s_feat in zip(teacher_feat, student_feat)
+            ]
+
+        return teacher_feat, student_feat
+
+    def _encode_teachers(
+        self,
+        img: Tensor,
+        *,
+        detach: bool,
+    ) -> dict[str, list[Tensor]]:
+        teacher_feats: dict[str, list[Tensor]] = {}
+        for teacher_name, adapter in self.teacher_adapters.items():
+            teacher_feats[teacher_name] = adapter.encode(
+                img,
+                get_interm_feats=True,
+                use_linstretch=True,
+                detach=detach,
+                repa_fixed_bs=self.repa_fixed_bs,
+            )
+        return teacher_feats
+
+    def _prepare_student_feats(
+        self,
+        student_feature: dict[str, Tensor | list[Tensor]],
+    ) -> dict[str, list[Tensor]]:
+        return {teacher_name: ensure_feature_list(feats) for teacher_name, feats in student_feature.items()}
+
+    def _align_teacher_student(
+        self,
+        teacher_feats: dict[str, list[Tensor]],
+        student_feats: dict[str, list[Tensor]],
+    ) -> tuple[dict[str, list[Tensor]], dict[str, list[Tensor]]]:
+        teacher_keys = set(teacher_feats.keys())
+        student_keys = set(student_feats.keys())
+        if teacher_keys != student_keys:
+            missing_in_student = sorted(teacher_keys - student_keys)
+            missing_in_teacher = sorted(student_keys - teacher_keys)
+            raise KeyError(
+                f"Teacher/student key mismatch: missing_in_student={missing_in_student}, missing_in_teacher={missing_in_teacher}"
+            )
+
+        aligned_teacher: dict[str, list[Tensor]] = {}
+        aligned_student: dict[str, list[Tensor]] = {}
+        for teacher_name in sorted(teacher_feats.keys()):
+            t_feats = teacher_feats[teacher_name]
+            s_feats = student_feats[teacher_name]
+            t_feats, s_feats = self._interp_teacher_or_student_features(t_feats, s_feats)
+            aligned_teacher[teacher_name] = t_feats
+            aligned_student[teacher_name] = s_feats
+        return aligned_teacher, aligned_student
+
+    @torch.no_grad()
+    def update_phi_stats_from_image(self, img: Tensor) -> None:
+        teacher_feats = self._encode_teachers(img, detach=True)
+        self.phi_loss.update_phi_stats(teacher_feats)
+
+    @torch.no_grad()
+    def reset_phi_stats(self) -> None:
+        self.phi_loss.reset_phi_stats()
+
+    @torch.no_grad()
+    def finalize_phi_from_stats(self, *, distributed: bool = True) -> None:
+        self.phi_loss.finalize_phi_from_stats(distributed=distributed)
+
+    @torch.no_grad()
+    def load_phi_from_cache(self, cache_path: str | Path, *, broadcast: bool = True) -> None:
+        self.phi_loss.load_phi_from_cache(cache_path, broadcast=broadcast)
+
+    @torch.no_grad()
+    def save_phi_to_cache(self, cache_path: str | Path) -> None:
+        self.phi_loss.save_phi_to_cache(cache_path)
+
+    def forward(self, img: Tensor, student_feature: dict[str, Tensor | list[Tensor]]) -> Tensor:
+        teacher_feats = self._encode_teachers(img, detach=True)
+        student_feats = self._prepare_student_feats(student_feature)
+        teacher_feats, student_feats = self._align_teacher_student(teacher_feats, student_feats)
+        return self.phi_loss(student_feats, teacher_feats)
 
 
 class VFLoss(REPALoss):

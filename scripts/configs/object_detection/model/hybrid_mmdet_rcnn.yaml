@@ -18,6 +18,7 @@ tokenizer:
       act_type: silu
       norm_groups: 32
       adaptive_mode: interp
+      act_checkpoint: true
       downsample_kwargs:
         padconv_use_manually_pad: false
       upsample_kwargs:
@@ -84,17 +85,17 @@ adapter:
   act_first: false
   conv_bias: false
   block_types: [mbconv, mbconv, mbconv, mbconv]
-tokenizer_pretrained_path: null
+tokenizer_pretrained_path: runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors
 input_channels: ${tokenizer_feature.in_channels}
 feature_keys: [res2, res3, res4, res5]
-encoder_feature_strides: [4, 8, 16, 32]
+encoder_feature_strides: [1, 2, 4, 8]
 feature_strides: [2, 4, 8, 16]
 fpn_out_features: [p2, p3, p4, p5]
 fpn_out_channels: 256
 num_classes: 2
 pixel_mean: 0.0
 pixel_std: 1.0
-freeze_backbone: true
+freeze_backbone: false
 device: cpu
 _debug: false
 detector:
@@ -118,6 +119,13 @@ detector:
         type: RPNHead
         in_channels: 256
         feat_channels: 256
+        loss_cls:
+          type: CrossEntropyLoss
+          use_sigmoid: true
+          loss_weight: 1.0
+        loss_bbox:
+          type: L1Loss
+          loss_weight: 1.0
         anchor_generator:
           type: AnchorGenerator
           ratios: [0.5, 1.0, 2.0]
@@ -138,6 +146,13 @@ detector:
           num_classes: 2
           in_channels: 256
           fc_out_channels: 1024
+          loss_cls:
+            type: CrossEntropyLoss
+            use_sigmoid: false
+            loss_weight: 1.0
+          loss_bbox:
+            type: L1Loss
+            loss_weight: 1.0
       train_cfg:
         rpn:
           assigner:
@@ -165,6 +180,7 @@ detector:
             pos_fraction: 0.25
             neg_pos_ub: -1
             add_gt_as_proposals: true
+          pos_weight: -1
       test_cfg:
         rpn:
           nms_pre: 1000
@@ -174,8 +190,8 @@ detector:
             iou_threshold: 0.7
           min_bbox_size: 0
         rcnn:
-          score_thr: 0.05
+          score_thr: 0.2  # 0.05
           nms:
             type: nms
-            iou_threshold: 0.5
+            iou_threshold: 0.4
           max_per_img: 100

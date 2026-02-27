@@ -188,6 +188,7 @@ CLAUDE.local.md
 
 compressed_output/
 **/output/
+**/outputs/
 
 # history
 .history/
