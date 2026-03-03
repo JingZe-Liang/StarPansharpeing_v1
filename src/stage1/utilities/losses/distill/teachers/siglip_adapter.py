@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+import inspect
 import math
 from pathlib import Path
 from types import MethodType
@@ -97,7 +98,7 @@ def load_siglip2_model(
     model = AutoModel.from_pretrained(
         name,
         quantization_config=bnb_config,
-        device_map="auto",
+        device_map=None,
         cache_dir=cache_dir,
         attn_implementation=attn_implem,
         local_files_only=local_files_only,
@@ -133,8 +134,11 @@ def patch_siglip_processor(
 
     processor.image_processor.do_rescale = False
 
+    call_sig = inspect.signature(processor.__call__)
+    allow_max_num_patches = "max_num_patches" in call_sig.parameters
+
     def _processor(*args, **kwargs):
-        if max_num_patches is not None:
+        if max_num_patches is not None and allow_max_num_patches:
             kwargs["max_num_patches"] = max_num_patches
 
         kwargs.setdefault("return_tensors", "pt")
@@ -169,20 +173,44 @@ class SiglipTeacherAdapter(TeacherAdapter):
         self.rgb_channels = rgb_channels
         self.pca_fn = pca_fn
 
+    def _select_hidden_layers(self, hidden_states: list[Tensor]) -> list[Tensor]:
+        if SIGLIP2_FEATURE_INDEX is None:
+            return hidden_states
+        if len(hidden_states) == len(SIGLIP2_FEATURE_INDEX):
+            return hidden_states
+
+        n_layers = getattr(getattr(self.encoder, "config", None), "num_hidden_layers", None)
+        offset = 0
+        if isinstance(n_layers, int) and len(hidden_states) == n_layers + 1:
+            offset = 1
+
+        selected: list[Tensor] = []
+        for idx in SIGLIP2_FEATURE_INDEX:
+            mapped_idx = idx + offset
+            if mapped_idx >= len(hidden_states):
+                break
+            selected.append(hidden_states[mapped_idx])
+        if len(selected) == len(SIGLIP2_FEATURE_INDEX):
+            return selected
+        return hidden_states
+
     def forward_features(self, x: Tensor | dict, *, get_interm_feats: bool, detach: bool) -> list[Tensor]:
-        if not isinstance(x, dict):
-            raise TypeError("Siglip adapter expects dict inputs from processor")
+        if not isinstance(x, Mapping):
+            raise TypeError("Siglip adapter expects mapping inputs from processor")
 
         inputs = dict(x)
         is_naflex = "spatial_shapes" in inputs
         shapes = inputs.get("spatial_shapes")
         dev = next(self.encoder.parameters()).device
         inputs = {k: v.to(dev) if hasattr(v, "to") else v for k, v in inputs.items()}
-        inputs["output_hidden_states"] = get_interm_feats
-        model_out = self.encoder(**inputs)
-
         if get_interm_feats:
-            out_feats = model_out.hidden_states
+            inputs["output_hidden_states"] = True
+        model_out = self.encoder(**inputs)
+        if get_interm_feats:
+            hidden_states = model_out.hidden_states
+            if hidden_states is None:
+                raise RuntimeError("Siglip model returned no hidden_states while output_hidden_states=True")
+            out_feats = self._select_hidden_layers(ensure_feature_list(hidden_states))
         else:
             out_feats = model_out.last_hidden_state
 
@@ -228,5 +256,8 @@ class SiglipTeacherAdapter(TeacherAdapter):
             img = (img + 1) / 2
         img = img.clamp(0, 1)
         assert self.processor is not None
-        inputs = cast(dict[str, Tensor], self.processor(images=img))
+        inputs_any = self.processor(images=img)
+        if not isinstance(inputs_any, Mapping):
+            raise TypeError(f"Siglip processor output must be mapping, got {type(inputs_any)}")
+        inputs = dict(inputs_any)
         return self.forward_features(inputs, get_interm_feats=get_interm_feats, detach=detach)

@@ -497,6 +497,7 @@ def _register_new_norms():
 
     create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore
     create_norm._NORM_MAP["tritonrmsnorm2d"] = TritonRMSNorm2d  # type: ignore
+    create_norm._NORM_MAP["trmsnorm2d"] = TritonRMSNorm2d
     create_norm._NORM_MAP["adaptivegroupnorm"] = AdaptiveGroupNorm  # type: ignore
     create_norm._NORM_MAP["gatedrmsnorm"] = GatedRMSNorm  # type: ignore
     create_norm._NORM_MAP["preaffinegatedrmsnorm"] = PreAffineGatedRMSNorm  # type: ignore

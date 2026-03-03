@@ -31,7 +31,7 @@ from ..model import (
     StyleGANDiscriminator,
     no_weight_gradients,
 )
-from ..repa import LatentGramLoss, REPALoss, VFLoss
+from ..repa import LatentGramLoss, PhiSMultipleTeacherDistillLoss, REPALoss, VFLoss
 from .hyperspectral_percep_loss import LPIPSHyperpspectralLoss
 from ..latent_reg import LatentSparsityLoss, lcr_loss
 
@@ -335,6 +335,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # gram loss
         gram_loss_weight: float | None = None,
         gram_loss_options: dict = {},
+        # phis loss
+        phis_loss_weight: float | None = None,
+        phis_loss_options: dict = {},
         # other losses
         lecam_loss_weight: float | None = None,
         lcr_loss_weight: float | None = None,
@@ -390,7 +393,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.reconstruction_weight = reconstruction_weight
         self.quantizer_type = quantizer_type
         self.disc_reg_freq = disc_reg_freq
-        disc_r1 = disc_r1 if disc_reg_gamma is None else disc_reg_gamma  # TODO: remove disc_r1 args
+        disc_r1 = disc_reg_r1 if disc_reg_gamma is None else disc_reg_gamma  # TODO: remove disc_r1 args
         self.disc_reg_gamma = disc_r1
         self.disc_reg_type = disc_reg_type
         self.disc_factor = disc_factor
@@ -472,10 +475,14 @@ class VQLPIPSWithDiscriminator(nn.Module):
             self.use_perceptual_loss = True
             self.perceptual_loss = LPIPSHyperpspectralLoss(**perceptual_options).to(self.device)
         self.perceptual_weight = perceptual_weight
+        self.phis_loss_weight = phis_loss_weight
+        self.use_phis = phis_loss_weight is not None and phis_loss_weight > 0
 
         # * repa loss
         self.repa_loss_weight = repa_loss_weight
         self.use_repa = False
+        if self.use_phis and repa_loss_weight is not None and repa_loss_weight > 0:
+            raise AssertionError("phis loss and repa loss can not be used at the same time")
         if repa_loss_weight is not None and repa_loss_weight > 0:
             self.use_repa = True
             if self.use_perceptual_loss and repa_loss_options["repa_model_name"] == perceptual_model:
@@ -488,6 +495,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # * visual foundation loss
         self.vf_loss_weight = vf_loss_weight
         self.use_vf = False
+        if self.use_phis and vf_loss_weight is not None and vf_loss_weight > 0:
+            raise AssertionError("phis loss and vf loss can not be used at the same time")
         if vf_loss_weight is not None and vf_loss_weight > 0:
             self.use_vf = True
             assert not self.use_repa, "repa loss and vf loss can not be used at the same time"
@@ -509,6 +518,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # * gram loss
         self.gram_loss_weight = gram_loss_weight
         self.use_gram = False
+        if self.use_phis and gram_loss_weight is not None and gram_loss_weight > 0:
+            raise AssertionError("phis loss and gram loss can not be used at the same time")
         if gram_loss_weight is not None and gram_loss_weight > 0:
             self.use_gram = True
             repa_encoder = None
@@ -520,6 +531,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
             gram_loss_options["repa_encoder"] = repa_encoder
             self.gram_loss = LatentGramLoss(**gram_loss_options).to(self.device)
             logger.info(f"[vq loss]: gram loss used, weighted {self.gram_loss_weight}")
+
+        # * phis loss
+        if self.use_phis:
+            self.phis_loss = PhiSMultipleTeacherDistillLoss(**phis_loss_options).to(self.device)
+            self.phis_loss.move_teachers_to(self.device, dtype=self.dtype)  # ty: ignore[invalid-argument-type]
+            logger.info(f"[vq loss]: phis loss used, weighted {self.phis_loss_weight}")
 
         # * LeCAM ema loss
         self.gen_loss_weight = gen_loss_weight
@@ -591,7 +608,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
             )
         else:
             raise ValueError(f"Unsupported discriminator type: {disc_network_type}")
-        self.discriminator = self.discriminator.to(self.device)
+        if self.discriminator is not None:
+            self.discriminator = self.discriminator.to(self.device)
 
         # * disc lossdisc_start_for_g
         self.disc_iter_start_for_g = disc_start_for_g
@@ -629,6 +647,31 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # zero buffer
         self.register_buffer("zero", torch.tensor(0.0), persistent=False)
+
+    def phis_reset_phi_stats(self) -> None:
+        if not self.use_phis:
+            raise RuntimeError("phis loss is not enabled")
+        self.phis_loss.reset_phi_stats()
+
+    def phis_update_phi_stats_from_image(self, img: torch.Tensor) -> None:
+        if not self.use_phis:
+            raise RuntimeError("phis loss is not enabled")
+        self.phis_loss.update_phi_stats_from_image(img)
+
+    def phis_finalize_phi_from_stats(self, distributed: bool = True) -> None:
+        if not self.use_phis:
+            raise RuntimeError("phis loss is not enabled")
+        self.phis_loss.finalize_phi_from_stats(distributed=distributed)
+
+    def phis_load_phi_from_cache(self, cache_path: str, broadcast: bool = True) -> None:
+        if not self.use_phis:
+            raise RuntimeError("phis loss is not enabled")
+        self.phis_loss.load_phi_from_cache(cache_path, broadcast=broadcast)
+
+    def phis_save_phi_to_cache(self, cache_path: str) -> None:
+        if not self.use_phis:
+            raise RuntimeError("phis loss is not enabled")
+        self.phis_loss.save_phi_to_cache(cache_path)
 
     def _calculate_adaptive_weight(self, nll_loss, g_loss, last_layer=None):
         if last_layer is not None:
@@ -908,6 +951,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         gram_loss: torch.Tensor | None = None,
         real_g_loss: torch.Tensor | None = None,
         repa_loss: torch.Tensor | None = None,
+        phis_loss: torch.Tensor | None = None,
         sem_dist_loss: torch.Tensor | None = None,
         vf_loss: torch.Tensor | None = None,
         lcr_loss: torch.Tensor | None = None,
@@ -940,6 +984,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 "perceptual_loss": _detach_if_not_None(percep_loss),
                 # Feature distillation loss
                 "repa_loss": _detach_if_not_None(repa_loss),
+                "phis_loss": _detach_if_not_None(phis_loss),
                 "sem_dist_loss": _detach_if_not_None(sem_dist_loss),
                 "vf_loss": _detach_if_not_None(vf_loss),
                 # Latent regularization loss
@@ -967,6 +1012,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "gram_loss": _detach_if_not_None(gram_loss),
                     "ssim_loss": _detach_if_not_None(ssim_loss),
                     "repa_loss": _detach_if_not_None(repa_loss),
+                    "phis_loss": _detach_if_not_None(phis_loss),
                     "sem_dist_loss": _detach_if_not_None(sem_dist_loss),
                     "vf_loss": _detach_if_not_None(vf_loss),
                     "lcr_loss": _detach_if_not_None(lcr_loss),
@@ -987,6 +1033,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "reconstruct_loss": reconstruction_loss.detach().mean(),
                     "perceptual_loss": _detach_if_not_None(percep_loss),
                     "gram_loss": _detach_if_not_None(gram_loss),
+                    "phis_loss": _detach_if_not_None(phis_loss),
                     "g_loss": real_g_loss.detach(),
                 }
 
@@ -1055,6 +1102,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         tokenizer_feat: torch.Tensor | list[torch.Tensor] | None = None,
         # for semantic distillation
         tokenizer_feat2: torch.Tensor | list[torch.Tensor] | None = None,
+        phis_student_feature: dict[str, torch.Tensor | list[torch.Tensor]] | None = None,
         enc_last_layer: nn.Parameter | None = None,
     ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor | float]]:
         # generator update
@@ -1110,6 +1158,15 @@ class VQLPIPSWithDiscriminator(nn.Module):
             with torch.autocast(self.device.type, dtype=self.dtype):
                 gram_loss = self.gram_loss(inputs, reconstructions, nll_loss, enc_last_layer)
             gram_loss = gram_loss * self.gram_loss_weight
+
+        # * phis loss
+        phis_loss_val = self.zero
+        if self.use_phis:
+            assert self.phis_loss_weight is not None
+            assert phis_student_feature is not None, "phis_student_feature is None"
+            with torch.autocast(self.device.type, dtype=self.dtype):
+                phis_loss_val = self.phis_loss(inputs, phis_student_feature)
+            phis_loss_val = phis_loss_val * self.phis_loss_weight
 
         # * lcr loss
         lcr_loss_val = self.zero
@@ -1183,6 +1240,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             nll_loss
             + g_loss
             + repa_loss
+            + phis_loss_val
             + vf_loss
             + sem_dist_loss
             + lcr_loss_val
@@ -1200,6 +1258,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             reconstruction_loss=recon_loss,
             gen_loss=g_loss,
             repa_loss=repa_loss,
+            phis_loss=phis_loss_val,
             sem_dist_loss=sem_dist_loss,
             vf_loss=vf_loss,
             lcr_loss=lcr_loss_val,
@@ -1327,16 +1386,17 @@ class VQLPIPSWithDiscriminator(nn.Module):
         enc_last_layer: nn.Parameter | None = None,
         cond: torch.Tensor | None = None,
         latent: torch.Tensor | None = None,
-        tokenizer_feat: torch.Tensor | None = None,
+        tokenizer_feat: torch.Tensor | list[torch.Tensor] | None = None,
         # tokenizer distillation feature (low-level and semantic)
-        tokenizer_feat2: torch.Tensor | None = None,
+        tokenizer_feat2: torch.Tensor | list[torch.Tensor] | None = None,
+        phis_student_feature: dict[str, torch.Tensor | list[torch.Tensor]] | None = None,
         split: str = "train",  # TODO: remove this
         add_prefix: bool = False,
     ):
         """Forward pass of the VQ-GAN loss function.
 
         This method computes different loss components based on the optimizer index:
-        - When optimizer_idx=0: Computes generator losses (reconstruction, perceptual, adversarial, quantization, REPA/VF)
+        - When optimizer_idx=0: Computes generator losses (reconstruction, perceptual, adversarial, quantization, REPA/VF/PhiS)
         - When optimizer_idx=1: Computes discriminator losses (adversarial with optional regularization)
 
         Args:
@@ -1351,6 +1411,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             enc_last_layer (nn.Parameter | None): Last layer of the encoder for VF loss adaptive weight computation.
             cond (torch.Tensor | None): Conditional input for conditional GANs.
             tokenizer_feat (torch.Tensor | None): Tokenizer features for REPA or VF loss computation.
+            phis_student_feature (dict[str, torch.Tensor | list[torch.Tensor]] | None): Student distillation features for PhiS multiple-teacher loss.
             split (str): Data split identifier (train/val/test). Defaults to "train".
             add_prefix (bool): Whether to add prefix to log keys. Defaults to False.
 
@@ -1395,6 +1456,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 latent=latent,
                 tokenizer_feat=tokenizer_feat,
                 tokenizer_feat2=tokenizer_feat2,
+                phis_student_feature=phis_student_feature,
                 enc_last_layer=enc_last_layer,
             )
 

@@ -5,6 +5,8 @@ defaults:
 
 model:
   _target_: src.stage2.object_detection.model.mmdetect.factory.build_hybrid_model_from_yaml
+  # model_type: fcos
+  # cfg_path: ${oc.env:MMDET_MODEL_CFG, ${hydra:runtime.cwd}/scripts/configs/object_detection/model/hybrid_mmdet_fcos.yaml}
   model_type: rcnn
   cfg_path: ${oc.env:MMDET_MODEL_CFG, ${hydra:runtime.cwd}/scripts/configs/object_detection/model/hybrid_mmdet_rcnn.yaml}
   overrides:
@@ -18,9 +20,13 @@ model:
             bbox_roi_extractor:
               roi_layer:
                 use_torchvision: true
+    freeze_backbone: true
+    adapter:
+      n_conv_per_stage: 1
+      depth_per_stage: 1
     tokenizer_feature:
       in_channels: 3
-      with_cp: true
+      with_cp: false
 
 dataloader:
   train:
@@ -52,30 +58,30 @@ dataloader:
       checksum: false
       to_neg_1_1: true
       is_train: false
-    batch_size: 6
+    batch_size: 4
     num_workers: 4
     shuffle: false
 
 optimizer:
-  # _target_: src.utilities.optim.muon_fused.MuonFSDP
-  # auto_split_muon_params: true
-  # oned_param_algo: lion
-  # ignored_keys_for_muon: []
-  # lr: 2e-4
-  # weight_decay: 0.05
-  # mu: 0.95
-  # betas: [0.9, 0.95]
-  # nesterov: true
-  # adjust_lr: rms_norm
-  # flatten: true
-  # use_triton: true
-  # use_preconditioned: false
-
-  type: AdamW
-  lr: 2e-4
-  betas: [0.9, 0.999]
-  eps: 1e-8
+  _target_: src.utilities.optim.muon_fused.MuonFSDP
+  auto_split_muon_params: true
+  oned_param_algo: lion
+  ignored_keys_for_muon: []
+  lr: 3e-4
   weight_decay: 0.05
+  mu: 0.95
+  betas: [0.9, 0.95]
+  nesterov: false
+  adjust_lr: rms_norm
+  flatten: true
+  use_triton: true
+  use_preconditioned: true
+
+  # type: AdamW
+  # lr: 2e-4
+  # betas: [0.9, 0.999]
+  # eps: 1e-8
+  # weight_decay: 0.05
 
 paramwise_cfg:
   norm_decay_mult: 0.0
@@ -124,4 +130,4 @@ runner:
   seed: 2026
   do_val: true
   resume: false
-  load_from: runs/object_detection/epoch_52.pth
+  load_from: null #runs/object_detection/epoch_52.pth

@@ -6,8 +6,8 @@
 - Python函数的变量需要有Python >3.12 type hint，不要用List, Tuple (from typing module)这些过时的hint，使用list, tuple这样更现代的typing hint
 - 当明确要求block注释的时候才注释，行内注释自由无限制。注释全部全部用英文编写。
 - 写代码的时候需要考虑复用，尽可能把不同的功能分开成小的子函数
-- 写完代码之后记得使`ty check`进行语法检查，确保代码无错误，但是只检查你修改的文件，不要check整个库，如果LSP报错但是你确信正确，直接用type: ignore，不要用cast
-- 测试使用pytest编写，放在scripts/tests/目录下
+- 写完所有的代码之后记得使`ty check`进行语法检查，确保代码无错误，但是只检查你修改的文件，不要check整个库，如果LSP报错但是你确信正确，直接用type: ignore，不要用cast
+- 测试使用pytest编写，放在scripts/tests/目录下，测试不需要跑ty，ruff，只需要保证语法正确，测试通过就行
 - 不允许删除任何数据文件，代码文件在用户允许下删除，但需要明确告知
 
 # 语言要求

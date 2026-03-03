@@ -164,6 +164,7 @@ logs/
 **.pth
 nohup.out
 env.yaml
+unsloth_compiled_cache/
 
 # weight dirs
 src/stage2/generative/tools/conditions/caption/weights/*

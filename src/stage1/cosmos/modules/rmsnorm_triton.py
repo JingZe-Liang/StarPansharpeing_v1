@@ -14,6 +14,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+# -----------------------------------------------------------
+# Modified by zihan-cao, UESTC
+# fixed forward / backward stride issue
+# - Performance comparison
+# Shape: [8, 128, 256, 256]
+# Py(timm+bias):   7.327 ms/iter, peak_delta=1665.00 MB
+# Triton(custom):  3.529 ms/iter, peak_delta=1538.00 MB
+# speedup(Py/Tri): 2.077x
+# -----------------------------------------------------------
+
 import torch
 import triton
 import triton.language as tl
@@ -31,6 +41,14 @@ def _rms_norm_2d_fwd_fused(
     M,
     C,
     N,
+    stride_xm,
+    stride_xc,
+    stride_xn,
+    stride_ym,
+    stride_yc,
+    stride_yn,
+    stride_rm,
+    stride_rn,
     num_blocks,  # number of columns in X
     eps,  # epsilon to avoid division by zero
     BLOCK_SIZE: tl.constexpr,
@@ -39,31 +57,27 @@ def _rms_norm_2d_fwd_fused(
     m_n = tl.program_id(0)
     m, n = m_n // num_blocks, m_n % num_blocks
 
-    Y += m * C * N
-    X += m * C * N
-    # Compute mean
-
     cols = n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = cols < N
 
     x_sum_square = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
     for off in range(0, C):
-        x = tl.load(X + off * N + cols, mask=mask, other=0.0).to(tl.float32)
+        x_ptr = X + m * stride_xm + off * stride_xc + cols * stride_xn
+        x = tl.load(x_ptr, mask=mask, other=0.0).to(tl.float32)
         x_sum_square += x * x
     mean_square = x_sum_square / C
     rrms = 1 / tl.sqrt(mean_square + eps)
-    # Write rstd
-    tl.store(Rrms + m * N + cols, rrms, mask=mask)
+    tl.store(Rrms + m * stride_rm + cols * stride_rn, rrms, mask=mask)
     # Normalize and apply linear transformation
     for off in range(0, C):
-        pos = off * N + cols
         w = tl.load(W + off)
         b = tl.load(B + off)
-        x = tl.load(X + pos, mask=mask, other=0.0).to(tl.float32)
+        x_ptr = X + m * stride_xm + off * stride_xc + cols * stride_xn
+        y_ptr = Y + m * stride_ym + off * stride_yc + cols * stride_yn
+        x = tl.load(x_ptr, mask=mask, other=0.0).to(tl.float32)
         x_hat = x * rrms
         y = x_hat * w + b
-        # Write output
-        tl.store(Y + pos, y, mask=mask)
+        tl.store(y_ptr, y, mask=mask)
 
 
 @triton.jit
@@ -74,37 +88,41 @@ def _rms_norm_2d_bwd_dx_fused(
     DB,  # pointer to the partial sum of biases gradient
     X,  # pointer to the input
     W,  # pointer to the weights
-    B,  # pointer to the biases
     Rrms,  # pointer to the 1/rms
     M,
     C,
     N,  # number of columns in X
+    stride_dxm,
+    stride_dxc,
+    stride_dxn,
+    stride_dym,
+    stride_dyc,
+    stride_dyn,
+    stride_xm,
+    stride_xc,
+    stride_xn,
+    stride_rm,
+    stride_rn,
     num_blocks,
-    eps,  # epsilon to avoid division by zero
-    GROUP_SIZE_M: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    BLOCK_SIZE_C: tl.constexpr,
 ):
     # Map the program id to the elements of X, DX, and DY it should compute.
     m_n = tl.program_id(0)
     m, n = m_n // num_blocks, m_n % num_blocks
-    X += m * C * N
-    DY += m * C * N
-    DX += m * C * N
-    Rrms += m * N
 
     cols = n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = cols < N
     # Offset locks and weights/biases gradient pointer for parallel reduction
     DW = DW + m_n * C
     DB = DB + m_n * C
-    rrms = tl.load(Rrms + cols, mask=mask, other=1)
+    rrms = tl.load(Rrms + m * stride_rm + cols * stride_rn, mask=mask, other=1)
     # Load data to SRAM
     c1 = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
     for off in range(0, C):
-        pos = off * N + cols
-        x = tl.load(X + pos, mask=mask, other=0).to(tl.float32)
-        dy = tl.load(DY + pos, mask=mask, other=0).to(tl.float32)
+        x_ptr = X + m * stride_xm + off * stride_xc + cols * stride_xn
+        dy_ptr = DY + m * stride_dym + off * stride_dyc + cols * stride_dyn
+        x = tl.load(x_ptr, mask=mask, other=0).to(tl.float32)
+        dy = tl.load(dy_ptr, mask=mask, other=0).to(tl.float32)
         w = tl.load(W + off).to(tl.float32)
         # Compute dx
         xhat = x * rrms
@@ -113,95 +131,107 @@ def _rms_norm_2d_bwd_dx_fused(
         wdy = tl.where(mask, wdy, 0.0)
         c1 += xhat * wdy
         # Accumulate partial sums for dw/db
-        tl.store(DW + off, tl.sum((dy * xhat).to(w.dtype), axis=0))
-        tl.store(DB + off, tl.sum(dy.to(w.dtype), axis=0))
+        tl.store(DW + off, tl.sum(dy * xhat, axis=0))
+        tl.store(DB + off, tl.sum(dy, axis=0))
 
     c1 /= C
     for off in range(0, C):
-        pos = off * N + cols
-        x = tl.load(X + pos, mask=mask, other=0).to(tl.float32)
-        dy = tl.load(DY + pos, mask=mask, other=0).to(tl.float32)
+        x_ptr = X + m * stride_xm + off * stride_xc + cols * stride_xn
+        dy_ptr = DY + m * stride_dym + off * stride_dyc + cols * stride_dyn
+        dx_ptr = DX + m * stride_dxm + off * stride_dxc + cols * stride_dxn
+        x = tl.load(x_ptr, mask=mask, other=0).to(tl.float32)
+        dy = tl.load(dy_ptr, mask=mask, other=0).to(tl.float32)
         w = tl.load(W + off).to(tl.float32)
         xhat = x * rrms
         wdy = w * dy
         dx = (wdy - (xhat * c1)) * rrms
-        # Write dx
-        tl.store(DX + pos, dx, mask=mask)
+        tl.store(dx_ptr, dx, mask=mask)
 
 
 class TritonRMSNorm2dFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weight, bias, eps):
+    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float) -> torch.Tensor:
         # allocate output
         y = torch.empty_like(x)
-        # reshape input data into 2D tensor
+
         x_arg = x.reshape(x.shape[0], x.shape[1], -1)
+        y_arg = y.reshape_as(x_arg)
         M, C, N = x_arg.shape
-        rrms = torch.empty((M, N), dtype=torch.float32, device="cuda")
-        # Less than 64KB per feature: enqueue fused kernel
+        rrms = torch.empty((M, N), dtype=torch.float32, device=x.device)
         BLOCK_SIZE = 256
         num_blocks = triton.cdiv(N, BLOCK_SIZE)
         num_warps = 8
-        # enqueue kernel
-        _rms_norm_2d_fwd_fused[(M * num_blocks,)](  #
+
+        fwd_kernel = _rms_norm_2d_fwd_fused[(M * num_blocks,)]
+        fwd_kernel(
             x_arg,
-            y,
+            y_arg,
             weight,
             bias,
-            rrms,  #
+            rrms,
             M,
             C,
             N,
+            x_arg.stride(0),
+            x_arg.stride(1),
+            x_arg.stride(2),
+            y_arg.stride(0),
+            y_arg.stride(1),
+            y_arg.stride(2),
+            rrms.stride(0),
+            rrms.stride(1),
             num_blocks,
-            eps,  #
-            BLOCK_SIZE=BLOCK_SIZE,
-            num_warps=num_warps,
-            num_ctas=1,
+            eps,
+            BLOCK_SIZE=BLOCK_SIZE,  # type: ignore
+            num_warps=num_warps,  # type: ignore
+            num_ctas=1,  # type: ignore
         )
-        ctx.save_for_backward(x, weight, bias, rrms)
+        ctx.save_for_backward(x_arg, weight, bias, rrms)
         ctx.BLOCK_SIZE = BLOCK_SIZE
         ctx.num_blocks = num_blocks
         ctx.num_warps = num_warps
-        ctx.eps = eps
         return y
 
     @staticmethod
-    def backward(ctx, dy):
-        x, w, b, rrms = ctx.saved_tensors
+    def backward(ctx, dy: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+        x_arg, w, b, rrms = ctx.saved_tensors
         num_blocks = ctx.num_blocks
 
-        x_arg = x.reshape(x.shape[0], x.shape[1], -1)
+        dy_arg = dy.reshape_as(x_arg)
         M, C, N = x_arg.shape
-        # GROUP_SIZE_M = 64
-        GROUP_SIZE_M = M * num_blocks
-        # allocate output
-        _dw = torch.empty((GROUP_SIZE_M, C), dtype=x.dtype, device=w.device)
-        _db = torch.empty((GROUP_SIZE_M, C), dtype=x.dtype, device=w.device)
-        dw = torch.empty((C,), dtype=w.dtype, device=w.device)
-        db = torch.empty((C,), dtype=w.dtype, device=w.device)
         dx = torch.empty_like(dy)
-        # enqueue kernel using forward pass heuristics
-        # also compute partial sums for DW and DB
-        # print(f"M={M}, num_blocks={num_blocks}, dx={dx.shape}, dy={dy.shape}, _dw={_dw.shape}, _db={_db.shape}, x={x.shape}, w={w.shape}, b={b.shape}, m={m.shape}, v={v.shape}, M={M}, C={C}, N={N}")
-        _rms_norm_2d_bwd_dx_fused[(M * num_blocks,)](  #
-            dx,
-            dy,
+        dx_arg = dx.reshape_as(x_arg)
+        partial_count = M * num_blocks
+        _dw = torch.empty((partial_count, C), dtype=torch.float32, device=w.device)
+        _db = torch.empty((partial_count, C), dtype=torch.float32, device=w.device)
+
+        bwd_kernel = _rms_norm_2d_bwd_dx_fused[(M * num_blocks,)]
+        bwd_kernel(
+            dx_arg,
+            dy_arg,
             _dw,
             _db,
-            x,
+            x_arg,
             w,
-            b,
-            rrms,  #
+            rrms,
             M,
             C,
             N,
+            dx_arg.stride(0),
+            dx_arg.stride(1),
+            dx_arg.stride(2),
+            dy_arg.stride(0),
+            dy_arg.stride(1),
+            dy_arg.stride(2),
+            x_arg.stride(0),
+            x_arg.stride(1),
+            x_arg.stride(2),
+            rrms.stride(0),
+            rrms.stride(1),
             num_blocks,
-            ctx.eps,  #
             BLOCK_SIZE=ctx.BLOCK_SIZE,
-            GROUP_SIZE_M=GROUP_SIZE_M,  #
-            BLOCK_SIZE_C=triton.next_power_of_2(C),
-            num_warps=ctx.num_warps,
+            num_warps=ctx.num_warps,  # type: ignore
         )
-        dw = _dw.sum(dim=0)
-        db = _db.sum(dim=0)
+        dw = _dw.sum(dim=0).to(w.dtype)
+        db = _db.sum(dim=0).to(w.dtype)
         return dx, dw, db, None

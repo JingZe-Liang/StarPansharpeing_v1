@@ -6,6 +6,7 @@ from typing import Literal
 
 import torch
 import torch.nn as nn
+from loguru import logger
 
 from .base import TeacherAdapter
 from .dino_adapter import DinoTeacherAdapter, load_repa_dino_v2_model, load_repa_dino_v3_model
@@ -20,6 +21,7 @@ def load_repa_encoder(
     *,
     load_from: str = "torch",
     dino_v3_pretrained_on: Literal["satellite", "web"] = "satellite",
+    dino_repo_path: str | Path | None = None,
     compile: bool = True,
 ):
     if repa_name == "dinov2":
@@ -29,6 +31,7 @@ def load_repa_encoder(
             weight_path,
             model_name,
             pretrained_on=dino_v3_pretrained_on,
+            repo_path=dino_repo_path,
             compile=compile,
         )
     if repa_name == "pe":
@@ -47,6 +50,7 @@ def build_teacher_adapter(
     repa_encoder: nn.Module | tuple[nn.Module, object] | None,
     dino_load_type: str,
     dino_pretrained_on: Literal["satellite", "web"],
+    dino_repo_path: str | Path | None,
     c_dim_first: bool,
     img_is_neg1_1: bool,
     rgb_channels: list[int] | str | None,
@@ -63,6 +67,7 @@ def build_teacher_adapter(
             weight_path=repa_model_load_path,
             load_from=dino_load_type,
             dino_v3_pretrained_on=dino_pretrained_on,
+            dino_repo_path=dino_repo_path,
             compile=False,
         )
 
@@ -71,7 +76,7 @@ def build_teacher_adapter(
         encoder = encoder_input.to(dtype)
         encoder.requires_grad_(False)
         encoder.eval()
-        return DinoTeacherAdapter(
+        teacher = DinoTeacherAdapter(
             repa_encoder=encoder,
             dino_type=dino_load_type,
             repa_model_name=repa_model_name,
@@ -82,6 +87,8 @@ def build_teacher_adapter(
             pca_fn=pca_fn,
             dino_pretrained_on=dino_pretrained_on,
         )
+        logger.success(f"Loaded DINO model {repa_model_name} from {repa_model_load_path}")
+        return teacher
 
     if repa_model_type == "siglip2":
         if isinstance(encoder_input, tuple):
@@ -91,7 +98,7 @@ def build_teacher_adapter(
         encoder = encoder.to(dtype)
         encoder.requires_grad_(False)
         encoder.eval()
-        return SiglipTeacherAdapter(
+        teacher = SiglipTeacherAdapter(
             repa_encoder=encoder,
             processor=processor,
             repa_img_size=repa_img_size,
@@ -99,13 +106,15 @@ def build_teacher_adapter(
             rgb_channels=rgb_channels,
             pca_fn=pca_fn,
         )
+        logger.success(f"Loaded Siglip2 model {repa_model_name} from {repa_model_load_path}")
+        return teacher
 
     if repa_model_type == "pe":
         assert isinstance(encoder_input, nn.Module)
         encoder = encoder_input.to(dtype)
         encoder.requires_grad_(False)
         encoder.eval()
-        return PETeacherAdapter(
+        teacher = PETeacherAdapter(
             repa_encoder=encoder,
             repa_model_name=repa_model_name,
             img_is_neg1_1=img_is_neg1_1,
@@ -113,5 +122,7 @@ def build_teacher_adapter(
             img_resize=img_resize,
             pca_fn=pca_fn,
         )
+        logger.success(f"Loaded PE model {repa_model_name} from {repa_model_load_path}")
+        return teacher
 
     raise ValueError(f"Unknown model type: {repa_model_type}")

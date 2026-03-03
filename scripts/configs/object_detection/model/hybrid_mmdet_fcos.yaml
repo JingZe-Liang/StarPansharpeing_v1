@@ -76,8 +76,8 @@ tokenizer_feature:
   extractor_kwargs: {}
 adapter:
   latent_width: 32
-  n_conv_per_stage: 2
-  depth_per_stage: 2
+  n_conv_per_stage: 1
+  depth_per_stage: 1
   norm: layernorm2d
   act: gelu
   drop: 0.0
@@ -91,11 +91,11 @@ encoder_feature_strides: [1, 2, 4, 8]
 feature_strides: [2, 4, 8, 16]
 fpn_out_features: [p2, p3, p4, p5]
 fpn_out_channels: 256
-num_classes: 2
+num_classes: 20
 pixel_mean: 0.0
 pixel_std: 1.0
-freeze_backbone: true
-device: cpu
+freeze_backbone: false
+device: cuda
 _debug: false
 detector:
   fpn_num_outs: 5
@@ -117,7 +117,7 @@ detector:
         add_extra_convs: on_output
       bbox_head:
         type: FCOSHead
-        num_classes: 2
+        num_classes: 20
         in_channels: 256
         feat_channels: 256
         strides: [16, 16, 16, 16, 32]

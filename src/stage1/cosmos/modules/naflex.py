@@ -1,4 +1,3 @@
-from timm.layers.create_norm import create_norm_layer
 import math
 from dataclasses import dataclass
 from functools import partial
@@ -21,6 +20,7 @@ from timm.layers.pos_embed import resample_abs_pos_embed
 from timm.layers import get_act_layer, Mlp, LayerScale
 from timm.models import eva, naflexvit
 from timm.models._manipulate import named_apply
+from timm.layers.create_norm import create_norm_layer
 from timm.models.eva import AttentionRope, DropPath, EvaAttention, GluMlp, Mlp, SwiGLU, apply_rot_embed_cat
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from timm.models.naflexvit import (
@@ -36,7 +36,9 @@ from timm.layers.drop import calculate_drop_path_rates
 from diffusers.models.embeddings import get_2d_sincos_pos_embed
 
 from src.utilities.config_utils import dataclass_from_dict, function_config_to_basic_types
+from src.utilities.func import extract_needed_kwargs
 from src.utilities.network_utils import compile_decorator
+from src.utilities.config_utils import set_defaults
 
 from .norm import *  # register custom norms
 from .transformer import GatedAttention
@@ -529,6 +531,7 @@ class EvaBlock(nn.Module):
             if sparse_linear_kwargs is not None:
                 attn_kwargs.update(sparse_linear_kwargs)
 
+        # --------------- build Attention ------------- #
         self.attn = attn_cls(
             dim,
             num_heads=num_heads,
@@ -547,6 +550,7 @@ class EvaBlock(nn.Module):
         self.gamma_1 = nn.Parameter(init_values * torch.ones(dim, **dd)) if init_values is not None else None
         self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
+        # -------------- build MLP ----------------- #
         self.norm2 = norm_layer(dim, **dd)
         hidden_features = int(dim * mlp_ratio)
         if swiglu_mlp or ffn_type == "swiglu":
@@ -572,11 +576,13 @@ class EvaBlock(nn.Module):
                     **dd,
                 )
 
-        elif ffn_type == "moe":
+        elif ffn_type == "moe_megatron":
             moe_kwargs = dict(kwargs.get("moe", {}) or {})
-            from .moe import MoEFFN
+            from .moe.moe_megatron import MoEFFN
 
-            num_layers = moe_kwargs.pop("num_layers", 12)
+            num_layers = moe_kwargs.pop("num_layers", None)  # this is hacky
+            assert num_layers is not None
+
             self.mlp = MoEFFN(
                 dim=dim,
                 n_heads=num_heads,
@@ -589,6 +595,30 @@ class EvaBlock(nn.Module):
                 **moe_kwargs,
             )
 
+        elif ffn_type == "moe_ds3":
+            moe_kwargs = dict(kwargs.get("moe", {}) or {})
+            from .moe.moe_gemm_ds3 import DeepSeekV3MoEGEMM
+
+            # alias
+            for src_key, dst_key in (("topk", "top_k"), ("num_groups", "n_group"), ("top_k_group", "topk_group")):
+                if src_key in moe_kwargs and dst_key not in moe_kwargs:
+                    moe_kwargs[dst_key] = moe_kwargs.pop(src_key)
+
+            aux_loss_free = bool(moe_kwargs.pop("aux_loss_free", False))
+            if aux_loss_free:
+                moe_kwargs = set_defaults(
+                    moe_kwargs, dict(enable_expert_bias=True, use_seq_aux_loss=False, seq_aux_loss_coef=0.0)
+                )
+            moe_kwargs = set_defaults(
+                moe_kwargs,
+                dict(hidden_size=dim, intermediate_size=hidden_features, num_experts=8),
+            )
+            ds3_kwargs = extract_needed_kwargs(moe_kwargs, DeepSeekV3MoEGEMM)
+
+            self.mlp = DeepSeekV3MoEGEMM(**ds3_kwargs)
+            if device is not None or dtype is not None:
+                self.mlp = self.mlp.to(device=device, dtype=dtype)
+
         elif ffn_type == "mlp":
             self.mlp = Mlp(
                 in_features=dim,
@@ -598,6 +628,10 @@ class EvaBlock(nn.Module):
                 drop=proj_drop,
                 **dd,
             )
+
+        else:
+            raise ValueError(f"Unsupported ffn_type {ffn_type}")
+
         self.gamma_2 = nn.Parameter(init_values * torch.ones(dim, **dd)) if init_values is not None else None
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
@@ -1001,9 +1035,9 @@ class Transformer(NaFlexVit):
                 f"Using <green>Hyperconnection</green> - this is experimental, with kwargs: "
                 f"{self._hc_implem=}, {self._hc_streams=}, {self.hc_other_kwargs=}"
             )
-
             self._use_hc = True
 
+            # TODO: set H^res to indentity matrix will help?
             from .mHC import (
                 HyperConnections,
                 get_init_and_expand_reduce_stream_functions,
@@ -1828,7 +1862,7 @@ class IJEPANaFlexViT(Transformer):
             assert isinstance(features, dict)
             x = self.forward_head(**features)  # ty: ignore error[invalid-argument-type]
         else:
-            # * This is the Tensor input x forward pass, not naflex mode ##################
+            ############### This is the Tensor input x forward pass, not naflex mode ##################
             assert torch.is_tensor(x)
 
             if output_type in (None, "2d"):

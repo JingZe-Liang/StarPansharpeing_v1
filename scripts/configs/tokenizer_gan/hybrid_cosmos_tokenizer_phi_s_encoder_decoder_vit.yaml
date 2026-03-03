@@ -1,0 +1,230 @@
+defaults:
+  # tokenizer ==========
+  - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
+  - tokenizer: cosmos_hybrid_phi_s_encoder_decoder_vit
+  - quantizer: quant
+  - proxy_task: ijepa
+  - accelerator: base
+  - vq_loss: remote_clip_RN50
+  # self ============
+  - hydra: base
+  - _self_
+
+  # hydra overrides ====
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+hydra:
+  run:
+    dir: runs/stage1_cosmos_hybrid_enc_dec/${now:%Y-%m-%d}/${now:%H-%M-%S}_${train.log.run_comment}
+  output_subdir: hydra_config
+
+accelerator:
+  gradient_accumulation_plugin:
+    _target_: accelerate.utils.GradientAccumulationPlugin
+    num_steps: 1
+
+proxy_task:
+  task: ["ijepa"]
+  loss_weights:
+    ijepa: 1.0
+  ijepa:
+    model:
+      embed_dim: ${tokenizer.trans_enc_cfg.embed_dim}
+    optimizer:
+      _target_: torch.optim.AdamW
+      _partial_: true
+      lr: 3.0e-4
+      weight_decay: 1.0e-5
+      eps: 1.0e-8
+      betas: [0.95, 0.99]
+      foreach: true
+    scheduler:
+      _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+      _partial_: true
+      num_warmup_steps: 500
+      num_training_steps: ${train.max_steps}
+      num_cycles: 1
+      reduced_factor: 2
+      min_lr: 1.0e-5
+
+tokenizer:
+  cnn_cfg:
+    use_repa_loss: true # keep true to build Phi-S student projection heads
+    use_vf_loss: false
+    quantizer_type: null
+  trans_enc_cfg:
+    pretrained_type: ["ijepa"]
+  distillation_cfg:
+    phis_student_source: semantic
+    semantic_feature_dim: 1024
+    teacher_proj_dims:
+      dinov3:
+        low_level_out_dim: 1024
+        semantic_out_dim: 1024
+      siglip2:
+        low_level_out_dim: 1024
+        semantic_out_dim: 1024
+      pe:
+        low_level_out_dim: 1024
+        semantic_out_dim: 1024
+
+vq_loss:
+  disc_in_channels: 512
+  # reconstruction only (plus Phi-S + IJEPA proxy loss)
+  perceptual_weight: 0.0
+  reconstruction_loss_type: mse
+  reconstruction_weight: 1.0
+  ssim_weight: 0.0
+
+  # disable repa/vf/gram/sem-distill
+  repa_loss_weight:
+  sem_distill_weight:
+  vf_loss_weight:
+  gram_loss_weight:
+
+  # Phi-S multi-teacher distillation
+  phis_loss_weight: 0.1
+  phis_loss_options:
+    phi_cache_path: runs/phi_s_cache/phi_s_buffer.pt
+    phi_cache_required: true
+    phi_cache_broadcast: true
+    phi_cache_load_on_init: true
+    c_dim_first: true
+    rgb_channels: mean
+    img_resize: 512
+    repa_img_size: 512
+    feature_resample_type: match_student
+    phi_loss_type: mse
+    teacher_configs:
+      dinov3:
+        repa_model_type: dinov3
+        repa_model_name: dinov3_vitl16
+        dino_pretrained_on: satellite
+        rgb_channels: mean
+        img_resize: 512
+        repa_img_size: 512
+      siglip2:
+        repa_model_type: siglip2
+        repa_model_name: google/siglip2-large-patch16-512
+        rgb_channels: mean
+        img_resize: 512
+        repa_img_size: 512
+      pe:
+        repa_model_type: pe
+        repa_model_name: PE-Spatial-L14-448
+        # Override this path if your checkpoint location is different.
+        repa_model_load_path: /Data/ZiHanCao/checkpoints/perception_models/PE-Spatial-L14-448.pt
+        rgb_channels: mean
+        img_resize: 512
+        repa_img_size: 512
+    teacher_dims:
+      dinov3: [1024, 1024, 1024, 1024]
+      siglip2: [1024, 1024, 1024, 1024]
+      pe: [1024, 1024, 1024, 1024]
+    teacher_weights:
+      dinov3: 0.34
+      siglip2: 0.33
+      pe: 0.33
+
+  # disable GAN
+  disc_network_type: none
+  disc_weight: 0.0
+  disc_start_for_g: 0
+  disc_start_for_d: 0
+  disc_loss: relative
+
+  # quantizer loss
+  quantizer_type:
+  quantizer_options:
+
+  # extra losses off
+  lecam_loss_weight:
+  lcr_loss_weight:
+
+ema:
+  beta: 0.999
+  update_after_step: 0
+  update_every: 2
+
+train:
+  tokenizer_name: hybrid_cosmos_phi_s_encdec_vit_f8c${tokenizer.cnn_cfg.model.latent_channels}p${tokenizer.cnn_cfg.model.patch_size}
+  proj_dir: null
+  finetune_strategy: finetune_all
+  max_grad_norm: 0.08
+  track_metrics: false
+  track_metrics_duration: -1
+  track_metrics_after: 2000
+  visualize_every: 200
+  max_steps: 1_000_000
+  save_every: 1000
+  resume_path:
+  ema_load_path:
+  compile_model: false
+  only_load_tokenizer: false
+  seperate_enc_dec: false
+  grad_check: false
+  proxy_task_train_type: unified
+
+  # augmentations
+  aug_pipeline_train_obj:
+  aug_pipeline:
+
+  finetune_cfg:
+    refine_decoder_head_n_layers: all
+    adapt_latent_n_layers: 0
+
+  tokenizer_optimizer:
+    _target_: src.utilities.optim.MuonFSDP.create_muon_optimizer
+    _partial_: true
+    betas: [0.9, 0.95]
+    mu: 0.95
+    oned_param_algo: lion
+    use_triton: true
+    use_preconditioned: true # turbo-muon style preconditioning
+    muon_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.02
+    oned_params_defaults:
+      lr: 4.0e-4
+      weight_decay: 0.02
+
+  disc_optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 3.0e-4
+    weight_decay: 1.0e-5
+    eps: 1.0e-8
+    betas: [0.5, 0.9] #[0.9, 0.95]
+    foreach: true
+
+  tokenizer_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+
+  # Not used when discriminator is disabled, kept for config compatibility.
+  disc_sched:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-5
+
+  log:
+    run_comment: phi_s_encdec_vit_ijepa_${dataset.used}
+    log_with_time: True
+    visualize_every: 500
+    log_every: 10
+
+  debug: true
+
+val:
+  val_duration: 1000
+  max_val_iters: 200

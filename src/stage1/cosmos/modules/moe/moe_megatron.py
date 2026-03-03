@@ -18,7 +18,7 @@ except ImportError:
     MoELayer = None
     MoESubmodules = None
 
-from .variants.mlp import SwiGLU
+from ..variants.mlp import SwiGLU
 
 
 # -----------------------------

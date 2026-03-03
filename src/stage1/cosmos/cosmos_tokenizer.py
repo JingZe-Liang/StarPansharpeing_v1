@@ -90,7 +90,7 @@ class MultiInputSequential(nn.Sequential):
 class DecoderSequential(nn.Module):
     def __init__(self, quant_conv, decoder):
         super().__init__()
-        self.quant_conv = quant_conv
+        self.quant_conv = quant_conv  # post_quant_conv actually
         self.decoder = decoder
 
     def __getitem__(self, item):
@@ -122,7 +122,7 @@ class DecoderSequential(nn.Module):
 
 @dataclass
 class EncoderDecoderConfig:
-    in_channels: Any = 16  # in or list[int]
+    in_channels: Any = 16  # int or list[int]
     out_channels: Any = 16
     channels: int = 128
     channels_mult: list[int] = field(default_factory=lambda: [2, 4, 4])
@@ -135,20 +135,22 @@ class EncoderDecoderConfig:
     spatial_compression: int = 8
     act_checkpoint: bool = False
     use_residual_factor: bool = False
+
     # resamples
     downsample_type: str = "PadConv"
     downsample_shortcut: Any = None  # str
     downsample_kwargs: Any = field(default_factory=lambda: {"padconv_use_manually_pad": True})  # fmt: skip
-    # downsample_manually_pad: bool = False  # FIXME: True originally  # old version
     upsample_type: str = "RepeatConv"
     upsample_shortcut: Any = None  # str
     upsample_kwargs: Any = field(default_factory=lambda: {"interp_type": "xy_repeat"})
+
     # patch size, patcher, and blocks
     patch_size: int = 1
     patch_method: str = "haar"
     conv_in_module: str = "conv"
     block_name: str = "res_block"
     attn_type: str = "none"  # 'attn_vanilla' or 'none'
+
     # if block_name != 'moe', does not use
     moe_n_experts: int = 4
     moe_n_selected: int = 1
@@ -156,22 +158,25 @@ class EncoderDecoderConfig:
     hidden_factor: int = 2
     moe_type: str = "tc"
     moe_token_mixer_type: str = "res_block"
+
     # padding and norm
     padding_mode: str = "reflect"
     norm_type: str = "gn"
     act_type: str = "silu"
     norm_groups: int = 32
     resample_norm_keep: bool = False
+
     # adaptive conv
-    adaptive_mode: str = "mix"
+    adaptive_mode: str = "interp"
     adaptive_conv_kwargs: Any = field(
         default_factory=lambda: {"router_condition": "per_channel_dw_pool", "router_dw_kernel_size": 3}
     )
+
     # generative decoder specific
     per_layer_noise: bool = False
 
     def __post_init__(self):
-        self.adaptive_mode in ("interp", "slice", "mix")
+        assert self.adaptive_mode in ("interp", "slice", "mix"), f"Invalid adaptive_mode: {self.adaptive_mode}"
 
 
 @dataclass
@@ -182,25 +187,34 @@ class ContinuousTokenizerConfig:
     hook_module: str = "decoder.decoder.mid.block_2"
     vf_on_z_or_module: str = "module"
     dino_feature_dim: int = 1024
+
     # quantizer related
     quantizer_type: Optional[str] = None  # "kl", "bsq", "fsq", "multiscale_bsq", "multiscale_leechq", None
     random_quant: float = 0.0
+    random_quant_per_sample: bool = True
+    dual_latent_branch: bool = False
+    continuous_latent_channels: int | None = None
     fsq_num_codebooks: int = 6
     fsq_levels: list[int] = field(default_factory=lambda: [8, 8, 8, 5, 5, 5])
+
     # multiscale bsq related
     mbsq_codebook_size: int = 1024
     mbsq_schedule_mode: str = "original"
+
     # multiscale leechq related
     mleech_codebook_size: int = 196560
     mleech_leech_type: str = "full"
     mleech_schedule_mode: str = "original"
+
     # quant convs
     norm_in_quant_conv: bool = False
+
     # loading related
     enc_path: Optional[str] = ""
     dec_path: Optional[str] = ""
     uni_path: Optional[str] = ""
-    loading_type: Optional[str] = None  # "nvidia", "uni", None
+    loading_type: Optional[str] = None  # "nvidia", "pretrained", "hybrid_pretrained", None
+
     # latent augmented related
     # channel drop from dc-vae2
     use_channel_drop: bool = False
@@ -208,23 +222,35 @@ class ContinuousTokenizerConfig:
     # latent noise
     latent_noise_prob: float = 0.0
     latent_noise_type: str = "beta_1_5"  # Beta time-step sample distribution
+
     # non-mask-out (replace)-type latent augmentation
     use_latent_mask: bool = False
     latent_mask_config: LatentMaskConfig = field(default_factory=LatentMaskConfig)
+
     # model related
     name: str = "ContinuousImageTokenizer"
     model: EncoderDecoderConfig = field(default_factory=EncoderDecoderConfig)
     decoder_type: str = "default"  # default or generative
     z_factor: int = 1
+
     # pretrained task
     pretrained_type: Any = None
 
     def __post_init__(self):
         assert self.quantizer_type in ("lfq", "kl", "bsq", "fsq", "multiscale_bsq", "multiscale_leechq", None)
+        assert 0.0 <= self.random_quant <= 1.0, "random_quant should be in [0, 1]"
         assert self.mbsq_schedule_mode in ("original", "dynamic")
         if self.quantizer_type == "leechq":
             self.model.latent_channels == 24, "predefined leech weight only supports latent channels 24"
             assert self.mleech_schedule_mode in ("original", "dynamic", "dense")
+        if self.dual_latent_branch:
+            assert self.quantizer_type in ("bsq", "fsq", "multiscale_bsq", "multiscale_leechq"), (
+                "dual_latent_branch currently supports discretization quantizers only"
+            )
+            assert self.continuous_latent_channels is not None, (
+                "continuous_latent_channels is required when dual_latent_branch=True"
+            )
+            assert self.continuous_latent_channels > 0, "continuous_latent_channels should be positive"
         assert self.decoder_type in ("default", "generative")
         assert self.pretrained_type in (None, "nvidia", "pretrained", "hybrid_pretrained")
         if self.use_channel_drop:
@@ -282,11 +308,15 @@ class ContinuousImageTokenizer(nn.Module):
         # 3. Quantizer
         self.quantizer_type = cfg.quantizer_type
         self.random_quant = cfg.random_quant
+        self.random_quant_per_sample = cfg.random_quant_per_sample
         self.quantizer = self._build_quantizer(cfg)
 
         self.loading_type = cfg.loading_type
         self.name = cfg.name
         self.latent_channels = model_cfg.latent_channels
+        self.continuous_latent_channels = cfg.continuous_latent_channels or model_cfg.latent_channels
+        self.dual_latent_branch = cfg.dual_latent_branch
+        self._warned_cont_latent_aug_skip = False
         self.norm_in_quant_conv = cfg.norm_in_quant_conv
 
         self.in_channels_after_patcher = (np.array(model_cfg.in_channels * model_cfg.patch_size**2)).tolist()
@@ -336,9 +366,15 @@ class ContinuousImageTokenizer(nn.Module):
         # not combine the encoder, for FSDP wrap
         encoder, decoder = self._build_encoder_decoder(cfg, model_cfg, **build_enc_dec_kwargs)
         quant_conv, post_quant_conv = self._build_pre_post_quant_convs(cfg)
-
         self.encoder = self.encoder_jit(encoder, quant_conv)
         self.decoder = self.decoder_jit(decoder, post_quant_conv)
+
+        # if is dual latent mix branch: mix continous latent and discreate latent
+        # mix the latent -> z (at z mixture) and then sent to decoder
+        if self.dual_latent_branch:
+            cont_quant_conv, cont_post_quant_conv = self._build_continuous_pre_post_quant_convs(cfg)
+            self.encoder.cont_quant_conv = cont_quant_conv
+            self.decoder.cont_post_quant_conv = cont_post_quant_conv
 
         if cfg.loading_type == "pretrained":
             # Load weights
@@ -388,7 +424,10 @@ class ContinuousImageTokenizer(nn.Module):
 
         num_parameters = sum(param.numel() for param in self.parameters())
         logger.info(f"model={self.name}, num_parameters={num_parameters:,}")
-        logger.info(f"z_channels={model_cfg.z_channels}, latent_channels={self.latent_channels}.")
+        logger.info(
+            f"z_channels={model_cfg.z_channels}, latent_channels={self.latent_channels}, "
+            f"continuous_latent_channels={self.continuous_latent_channels}, dual_latent_branch={self.dual_latent_branch}."
+        )
 
         # pretraining task
         self.pretrained_type = cfg.pretrained_type
@@ -487,8 +526,8 @@ class ContinuousImageTokenizer(nn.Module):
                 DeprecationWarning,
             )
             quant_conv = nn.Sequential(
-                Normalize(model_cfg.latent_channels, norm_type=cfg.model.norm_type),  # type: ignore
-                torch.nn.Conv2d(model_cfg.latent_channels, q_conv_chan, 1),
+                Normalize(model_cfg.z_channels, norm_type=cfg.model.norm_type),  # type: ignore
+                torch.nn.Conv2d(model_cfg.z_channels, q_conv_chan, 1),
             )
             nn.init.ones_(quant_conv[0].weight)
             nn.init.zeros_(quant_conv[0].bias)
@@ -509,6 +548,32 @@ class ContinuousImageTokenizer(nn.Module):
         logger.debug(f"[Tokenizer]: Built quant_conv/post_quant_conv and init them")
 
         return quant_conv, post_quant_conv
+
+    def _build_continuous_pre_post_quant_convs(self, cfg: ContinuousTokenizerConfig):
+        model_cfg = self.model_cfg
+        cont_latent_channels = self.continuous_latent_channels
+        _quant_conv_init_kwargs = dict(std=0.01, a=-1.2, b=1.2)
+
+        if self.norm_in_quant_conv:
+            cont_quant_conv = nn.Sequential(
+                Normalize(model_cfg.z_channels, norm_type=cfg.model.norm_type),  # type: ignore
+                torch.nn.Conv2d(model_cfg.z_channels, cont_latent_channels, 1),
+            )
+            nn.init.ones_(cont_quant_conv[0].weight)
+            nn.init.zeros_(cont_quant_conv[0].bias)
+            nn.init.trunc_normal_(cont_quant_conv[1].weight, **_quant_conv_init_kwargs)
+            nn.init.zeros_(cont_quant_conv[1].bias)
+        else:
+            cont_quant_conv = torch.nn.Conv2d(model_cfg.z_channels, cont_latent_channels, 1)
+            nn.init.trunc_normal_(cont_quant_conv.weight, **_quant_conv_init_kwargs)
+            nn.init.zeros_(cont_quant_conv.bias)
+
+        cont_post_quant_conv = torch.nn.Conv2d(cont_latent_channels, model_cfg.z_channels, 1)
+        nn.init.trunc_normal_(cont_post_quant_conv.weight, std=0.01)
+        nn.init.zeros_(cont_post_quant_conv.bias)
+        logger.debug("[Tokenizer]: Built continuous quant_conv/post_quant_conv and init them")
+
+        return cont_quant_conv, cont_post_quant_conv
 
     def _build_lejepa_projector(self, cfg: ContinuousTokenizerConfig):
         from src.stage1.self_supervised.lejepa_aug import create_lejepa_projector
@@ -614,7 +679,7 @@ class ContinuousImageTokenizer(nn.Module):
     def encoder_jit(self, encoder, quant_conv):
         return nn.Sequential(OrderedDict([("encoder", encoder), ("quant_conv", quant_conv)]))
 
-    def decoder_jit(self, decoder, post_quant_conv):
+    def decoder_jit(self, decoder, post_quant_conv) -> DecoderSequential:
         return DecoderSequential(post_quant_conv, decoder)
 
     def register_feature_hook(self):
@@ -623,6 +688,16 @@ class ContinuousImageTokenizer(nn.Module):
 
         self.get_submodule(self._hook_module).register_forward_hook(hook)
         logger.info(f"[Cosmos Tokenizer]: module {self._hook_module} is registered for hook")
+
+    @staticmethod
+    def _maybe_channels_last_4d(x: Tensor) -> Tensor:
+        if not cosmos_block.model_compiled_flag:
+            return x
+        if (not x.is_cuda) or x.ndim != 4:
+            return x
+        if x.is_contiguous(memory_format=torch.channels_last):
+            return x
+        return x.contiguous(memory_format=torch.channels_last)
 
     ########### model feature alignment ##############
 
@@ -758,6 +833,66 @@ class ContinuousImageTokenizer(nn.Module):
             # Or decided by the input arg
             return use_quantizer
 
+    def _quantizer_kept_mask(self, h: Tensor, use_quantizer: bool | None = None) -> Tensor:
+        bs = h.shape[0]
+        if self.quantizer_type is None:
+            return torch.zeros(bs, device=h.device, dtype=torch.bool)
+
+        if use_quantizer is not None:
+            return torch.full((bs,), bool(use_quantizer), device=h.device, dtype=torch.bool)
+
+        if self.training and self.random_quant > 0.0:
+            if not self.random_quant_per_sample:
+                keep_all = self.random_quant > random.random()
+                return torch.full((bs,), keep_all, device=h.device, dtype=torch.bool)
+            # Per-sample quantizer keep mask.
+            return torch.rand(bs, device=h.device) < self.random_quant
+
+        return torch.ones(bs, device=h.device, dtype=torch.bool)
+
+    def _get_cont_quant_conv(self) -> nn.Module:
+        cont_quant_conv = getattr(self.encoder, "cont_quant_conv", None)
+        if cont_quant_conv is None:
+            raise RuntimeError("continuous quant conv is not initialized")
+        return cont_quant_conv
+
+    def _get_cont_post_quant_conv(self) -> nn.Module:
+        cont_post_quant_conv = getattr(self.decoder, "cont_post_quant_conv", None)
+        if cont_post_quant_conv is None:
+            raise RuntimeError("continuous post quant conv is not initialized")
+        return cont_post_quant_conv
+
+    def _get_post_quant_conv(self) -> nn.Module:
+        post_quant_conv = self.decoder.quant_conv
+        if isinstance(post_quant_conv, nn.ModuleDict):
+            return post_quant_conv.post_quant_conv
+        return post_quant_conv
+
+    def _dual_latents_to_z_mixture(
+        self,
+        latent_quant: Tensor | None,
+        latent_cont: Tensor | None,
+        quant_keep_mask: Tensor,
+    ) -> Tensor:
+        if quant_keep_mask.all():
+            assert latent_quant is not None, "quant latent should not be None when all samples use quantizer"
+            return self._get_post_quant_conv()(latent_quant)
+
+        if (~quant_keep_mask).all():
+            assert latent_cont is not None, "continuous latent should not be None when all samples skip quantizer"
+            return self._get_cont_post_quant_conv()(latent_cont)
+
+        assert latent_quant is not None and latent_cont is not None, (
+            "both latent_quant and latent_cont should be available when mixed routing is used"
+        )
+
+        # seperated post quant conv
+        z_quant = self._get_post_quant_conv()(latent_quant)
+        z_cont = self._get_cont_post_quant_conv()(latent_cont)
+        mask = quant_keep_mask.view(-1, 1, 1, 1)
+
+        return torch.where(mask, z_quant, z_cont)
+
     def _has_quantizer_applied_fn(self, h):
         """
         z is the before quant conv feature
@@ -842,13 +977,108 @@ class ContinuousImageTokenizer(nn.Module):
         return res
 
     def apply_quantizer(self, h: Tensor, use_quantizer: bool | None = None, **kwargs):
-        _use_quantizer = self._use_quantizer(use_quantizer)
-        # Quantization
-        if _use_quantizer:
-            return self._has_quantizer_applied_fn(h)
-        # Autoencoder
-        else:
+        keep_mask = self._quantizer_kept_mask(h, use_quantizer=use_quantizer)
+        if not keep_mask.any():
             return h
+
+        quant_ret = self._has_quantizer_applied_fn(h)
+        if keep_mask.all():
+            return quant_ret
+
+        # Mixed quantized / continuous latents only works when quantizer output
+        # has the same shape as the pre-quant latent.
+        if self.quantizer_type in ("kl", "psd"):
+            return quant_ret
+
+        hq, q_loss, loss_breakdown = quant_ret
+        mask = keep_mask.view(-1, 1, 1, 1)
+        mixed_h = torch.where(mask, hq, h)
+        keep_ratio = keep_mask.float().mean()
+        mixed_q_loss = q_loss * keep_ratio
+
+        if isinstance(loss_breakdown, (dict, edict)):
+            loss_breakdown["quant_keep_mask"] = keep_mask
+            loss_breakdown["quant_keep_ratio"] = keep_ratio
+
+        return mixed_h, mixed_q_loss, loss_breakdown
+
+    def _latent_aug_for_cont_branch(self, h: Tensor) -> Tensor:
+        if not self.training:
+            return h
+
+        if self.use_channel_drop or self.use_latent_mask:
+            if not self._warned_cont_latent_aug_skip:
+                logger.warning(
+                    "Skip channel_drop/latent_mask on continuous branch due channel mismatch; "
+                    "only latent noise is applied on continuous branch."
+                )
+                self._warned_cont_latent_aug_skip = True
+            if self.use_latent_denoise:
+                return self._latent_noising(h, None)
+            return h
+
+        return self.latent_aug(h)
+
+    def _encode_latent_branches(
+        self,
+        z: Tensor,
+        use_quantizer: bool | None = None,
+        *,
+        h_pre_quant: Tensor | None = None,
+    ) -> edict:
+        if h_pre_quant is None:
+            h_pre_quant = self.encoder.quant_conv(z)
+
+        if not self.dual_latent_branch:
+            maybe_q_ret = self.apply_quantizer(h_pre_quant, use_quantizer)
+            if isinstance(maybe_q_ret, tuple):
+                h, q_loss, loss_breakdown = maybe_q_ret
+            else:
+                h = maybe_q_ret
+                q_loss = None
+                loss_breakdown = None
+            h = self.latent_aug(h)
+            return edict(
+                latent=h,
+                latent_is_dual=False,
+                q_loss=q_loss,
+                q_loss_breakdown=loss_breakdown,
+            )
+
+        quant_keep_mask = self._quantizer_kept_mask(h_pre_quant, use_quantizer=use_quantizer)
+        use_quant_path = bool(quant_keep_mask.any().item())
+        use_cont_path = bool((~quant_keep_mask).any().item())
+
+        latent_quant: Tensor | None = None
+        latent_cont: Tensor | None = None
+        q_loss: Tensor | None = None
+        loss_breakdown: dict | edict | None = None
+
+        if use_quant_path:
+            maybe_q_ret = self._has_quantizer_applied_fn(h_pre_quant)
+            latent_quant, q_loss, loss_breakdown = maybe_q_ret
+            keep_ratio = quant_keep_mask.float().mean()
+            q_loss = q_loss * keep_ratio
+            if isinstance(loss_breakdown, (dict, edict)):
+                loss_breakdown["quant_keep_mask"] = quant_keep_mask
+                loss_breakdown["quant_keep_ratio"] = keep_ratio
+            latent_quant = self.latent_aug(latent_quant)
+
+        if use_cont_path:
+            cont_quant_conv = self._get_cont_quant_conv()
+            latent_cont = cont_quant_conv(z)
+            latent_cont = self._latent_aug_for_cont_branch(latent_cont)
+
+        latent = latent_quant if latent_quant is not None else latent_cont
+        return edict(
+            latent=latent,
+            latent_quant=latent_quant,
+            latent_cont=latent_cont,
+            quant_keep_mask=quant_keep_mask,
+            latent_is_dual=True,
+            q_loss=q_loss,
+            q_loss_breakdown=loss_breakdown,
+        )
 
     def latent_aug(self, h: Tensor) -> Tensor:
         if self.training:
@@ -869,24 +1099,21 @@ class ContinuousImageTokenizer(nn.Module):
                     # replace with mask token
                     mask_token_expanded = self.mask_token.expand_as(h)
                     h = torch.where(mask_lmr, mask_token_expanded, h)
-
         return h
 
     def encode_with_intermediate_features(self, x: Tensor, use_quantizer: bool | None = None):
         """outter method for get encoder's intermidates"""
         z, feats = self.encoder.encoder(x, ret_interm_feats=True)
-        h = self.encoder.quant_conv(z)
-        maybe_q_encoded = self.apply_quantizer(h, use_quantizer)
+        h_pre_quant = self.encoder.quant_conv(z)
+        branch_out = self._encode_latent_branches(z, use_quantizer=use_quantizer, h_pre_quant=h_pre_quant)
 
-        q_loss = loss_breakdown = None
-        if isinstance(maybe_q_encoded, tuple):
-            encoded, q_loss, loss_breakdown = maybe_q_encoded
-        else:
-            encoded = maybe_q_encoded
-
-        result = edict(encoded=encoded, itermediate_feats=feats)
-        result.q_loss = q_loss
-        result.q_loss_breakdown = loss_breakdown
+        result = edict(encoded=branch_out.latent, itermediate_feats=feats)
+        result.q_loss = branch_out.q_loss
+        result.q_loss_breakdown = branch_out.q_loss_breakdown
+        if branch_out.latent_is_dual:
+            result.latent_quant = branch_out.latent_quant
+            result.latent_cont = branch_out.latent_cont
+            result.quant_keep_mask = branch_out.quant_keep_mask
         return result
 
     def encode_lejepa(self, x, **_ignored_kwargs):
@@ -898,18 +1125,8 @@ class ContinuousImageTokenizer(nn.Module):
         h_proj = self.lejepa_projector(h_pool)
         return h_proj
 
-    @staticmethod
-    def _maybe_channels_last_4d(x: Tensor) -> Tensor:
-        if not cosmos_block.model_compiled_flag:
-            return x
-        if (not x.is_cuda) or x.ndim != 4:
-            return x
-        if x.is_contiguous(memory_format=torch.channels_last):
-            return x
-        return x.contiguous(memory_format=torch.channels_last)
-
     def encode(self, x: Tensor, use_quantizer: bool | None = None):
-        enc_out = edict(latent=None, q_loss=None, q_loss_breakdown=None)
+        enc_out = edict(latent=None, q_loss=None, q_loss_breakdown=None, latent_is_dual=False)
         # x = self._maybe_channels_last_4d(x)
 
         need_repa_cache = self.training and (hasattr(self, "_repa_proj") or hasattr(self, "_vf_proj"))
@@ -931,18 +1148,8 @@ class ContinuousImageTokenizer(nn.Module):
             h_pre_quant = self.encoder.quant_conv(z)
             self.z = h_pre_quant
 
-        # Quantization
-        maybe_q_ret = self.apply_quantizer(h_pre_quant, use_quantizer)
-        if isinstance(maybe_q_ret, tuple):
-            h, q_loss, loss_breakdown = maybe_q_ret
-            enc_out.update(latent=h, q_loss=q_loss, q_loss_breakdown=loss_breakdown)
-        else:
-            h = maybe_q_ret
-
-        # z augmentions
-        h = self.latent_aug(h)
-        # h = self._maybe_channels_last_4d(h)
-        enc_out.latent = h
+        branch_out = self._encode_latent_branches(z, use_quantizer=use_quantizer, h_pre_quant=h_pre_quant)
+        enc_out.update(branch_out)
 
         return enc_out
 
@@ -961,13 +1168,22 @@ class ContinuousImageTokenizer(nn.Module):
         clamp: Clamp decoded values to (-1, 1).
         """
         dec_out = edict(**inp) if isinstance(inp, dict) else edict(latent=inp)  # type: ignore
-        # h = self._maybe_channels_last_4d(dec_out["latent"])
-        h = dec_out["latent"]
-        dec_out["latent"] = h
 
         # Decoder
         chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
-        dec = self.decoder(h, chan)  # [b, c, h, w]
+        if dec_out.get("latent_is_dual", False):
+            quant_keep_mask = dec_out.get("quant_keep_mask")
+            assert torch.is_tensor(quant_keep_mask), "quant_keep_mask should be a Tensor in dual latent branch"
+            z_dec = self._dual_latents_to_z_mixture(
+                latent_quant=dec_out.get("latent_quant"),
+                latent_cont=dec_out.get("latent_cont"),
+                quant_keep_mask=quant_keep_mask,
+            )
+            dec = self.decoder.decoder(z_dec, chan)
+            dec_out["decoder_z"] = z_dec
+        else:
+            # h = self._maybe_channels_last_4d(dec_out["latent"])
+            dec = self.decoder(dec_out["latent"], chan)  # [b, c, h, w]
 
         # Clamp
         if clamp:
@@ -978,7 +1194,7 @@ class ContinuousImageTokenizer(nn.Module):
 
     def forward(self, input: torch.Tensor, enc_kwargs: dict = {}, dec_kwargs: dict = {}) -> dict:
         if cosmos_block.model_compiled_flag:
-            torch.compiler.cudagraph_mark_step_begin()  # ty: ignore
+            torch.compiler.cudagraph_mark_step_begin()
 
         enc = self.encode(input, **enc_kwargs)
         dec = self.decode(enc, input.shape, **dec_kwargs)
@@ -1343,7 +1559,8 @@ def vae_f8_config(
             "act_checkpoint": True,
             "block_name": "res_block",  # res_block, res_moe
             "padding_mode": "reflect",
-            "norm_type": "rmsnorm2d",
+            # "norm_type": "rmsnorm2d",
+            "norm_type": "gn",
             "norm_groups": 32,
             "attn_type": "none",
             "adaptive_mode": "interp",
@@ -1431,25 +1648,15 @@ def test_tokenizer_forward_backward(
     from src.utilities.metrics.aggregation import StackMeanMetrics
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
-    config = vae_f8_config(512, 16, quantizer_type=None, pretrained_path=base_model_ckpt)
+    config = vae_f8_config(512, 64, quantizer_type="bsq", pretrained_path=base_model_ckpt)
     if other_model_kwargs:
         if "model" in other_model_kwargs:
             config["model"].update(other_model_kwargs.pop("model"))
         else:
             config.update(other_model_kwargs)
 
-    if base_model_ckpt not in ("", None):
-        import accelerate
-
-        with accelerate.init_empty_weights():
-            tokenizer = model_cls.create_model(**config)
-        accelerate.load_checkpoint_and_dispatch(tokenizer, base_model_ckpt, device_map="auto")
-        # Use to_empty() for meta tensor -> device conversion
-        # tokenizer = tokenizer.to_empty(device=device)
-        tokenizer = tokenizer.to(dtype)
-    else:
-        tokenizer = model_cls.create_model(**config)
-        tokenizer = tokenizer.to(device, dtype)
+    tokenizer = model_cls.create_model(**config)
+    tokenizer = tokenizer.to(device, dtype)
 
     is_lora = lora_ckpt is not None
     if is_lora:
@@ -1684,11 +1891,12 @@ if __name__ == "__main__":
     """
     # Test lora
     test_tokenizer_forward_backward(
-        base_model_ckpt="runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors",
-        lora_ckpt="runs/stage1_cosmos_nested_lora/2026-02-20_19-00-12_cosmos_lora=lora_r=32_f8c16p1_hsigene/peft_ckpt/hsigene",
+        # base_model_ckpt="runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors",
+        # lora_ckpt="runs/stage1_cosmos_nested_lora/2026-02-20_19-00-12_cosmos_lora=lora_r=32_f8c16p1_hsigene/peft_ckpt/hsigene",
+        base_model_ckpt="runs/pretrained/cosmos_f8c64_bsq/ema/tokenizer/model.safetensors",
         save_pca_vis=False,
         pca_type="z",
-        real_data="HSIGene",
+        real_data="SAM270k",
         # save_img_dir='tmp/hsi_gene_recon',  # "tmp/vis_pansharpening_loras",
         rgb_chans=[20, 12, 4],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,

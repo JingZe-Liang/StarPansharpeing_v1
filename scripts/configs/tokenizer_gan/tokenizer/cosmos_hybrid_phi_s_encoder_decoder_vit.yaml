@@ -1,0 +1,94 @@
+_target_: src.stage1.cosmos.cosmos_hybrid.CosmosHybridTokenizer.create_model
+
+# CNN encoder x8
+# Transformer encoder x2
+# Downsample total x16
+
+# Phi-S semantic-only distillation + encoder/decoder ViT + bottleneck after semantic encoder
+
+cnn_cfg:
+  model:
+    resolution: 1024
+    in_channels: 512
+    out_channels: 512
+    z_channels: 768
+    latent_channels: 32
+    channels: 128
+    channels_mult: [2, 4, 4]
+    num_res_blocks: 2
+    attn_resolutions: []
+    dropout: 0.0
+    spatial_compression: 8
+    patch_size: 1
+    block_name: res_block
+    norm_type: trmsnorm2d #gn
+    act_type: silu
+    adaptive_mode: interp
+    downsample_kwargs:
+      padconv_use_manually_pad: false
+    upsample_kwargs:
+      interp_type: nearest_interp
+    per_layer_noise: false
+  quantizer_type: null
+  vf_on_z_or_module: z
+  # Keep this true to build student projection heads used by Phi-S student features.
+  use_repa_loss: true
+  dino_feature_dim: 1024
+  decoder_type: default # [default, generative]
+
+trans_enc_cfg:
+  embed_dim: 1152
+  depth: 16
+  num_heads: 16
+  mlp_ratio: 4.0
+  qkv_bias: true
+  patch_size: 2
+  norm_layer: flarmsnorm
+  pos_embed: learned
+  pos_embed_grid_size: [32, 32]
+  rope_type: axial
+  img_size: 32
+  in_chans: 768
+  out_chans: 768
+  unpatch_size: 1
+  reg_tokens: 4
+  compile_model: false
+  attn_type: gated
+
+trans_dec_cfg:
+  embed_dim: 1024
+  depth: 6
+  num_heads: 16
+  mlp_ratio: 4.0
+  qkv_bias: true
+  patch_size: 1
+  norm_layer: flarmsnorm
+  pos_embed: learned
+  pos_embed_grid_size: [32, 32]
+  rope_type: axial
+  img_size: 32
+  in_chans: 768
+  out_chans: 768
+  unpatch_size: 2 # sem decoder -> cnn decoder
+  reg_tokens: 4
+  compile_model: false
+
+distillation_cfg:
+  dino_feature_dim: 1024
+  semantic_feature_dim: 1024
+  phis_student_source: semantic
+  cache_layers:
+    low_level: [0, 1, 2, -1]
+    semantic: [5, 11, 17, 23]
+  # Optional multi-teacher projection dims for Phi-S:
+  # teacher_proj_dims:
+  #   dino:
+  #     low_level_out_dim: 1024
+  #     semantic_out_dim: 1024
+  #   siglip:
+  #     low_level_out_dim: 1152
+  #     semantic_out_dim: 1152
+
+hybrid_tokenizer_cfg:
+  latent_bottleneck_type: after_semantic
+  latent_straight_through_skip: false

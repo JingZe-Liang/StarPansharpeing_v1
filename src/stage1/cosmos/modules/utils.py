@@ -243,10 +243,12 @@ def Normalize(in_channels, norm_type: str | None = "gn", **norm_kwargs) -> nn.Mo
         return partial(unit_magnitude_normalize, dim=1, eps=norm_kwargs.get("eps", 1e-4))
     elif norm_type == "rms_native":
         cls = RMSNorm2d
-    elif norm_type == "rms_triton":
+    elif norm_type in ("rms_triton", "trmsnorm2d"):
         cls = TritonRMSNorm2d
     elif norm_type == "rmsnorm2d":
         cls = tl.RmsNorm2d
+    elif norm_type == "rmsnorm2dfp32":
+        cls = tl.RmsNorm2dFp32
     elif norm_type in (None, "none"):
         return torch.nn.Identity()
     else:

@@ -204,9 +204,10 @@ def main(cfg: DictConfig) -> None:
         else:
             val_loader = hydra.utils.instantiate(cfg.dataloader.val)
 
-    runner = _build_runner(cfg, model, train_loader, val_loader, val_evaluator)
-    logger.info("Start training with MMDetection runner.")
-    runner.train()
+    with logger.catch():
+        runner = _build_runner(cfg, model, train_loader, val_loader, val_evaluator)
+        logger.info("Start training with MMDetection runner.")
+        runner.train()
 
 
 if __name__ == "__main__":

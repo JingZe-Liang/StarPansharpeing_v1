@@ -438,7 +438,7 @@ def load_diffbands_tokenizer_then_peft_lora(
     return peft_config, tokenizer
 
 
-def safe_init_weights(func):
+def safe_init_weights(init_func):
     def _wrapper(*args, **kwargs):
         module = args[0]
         assert isinstance(module, nn.Module), f"{module} is not a nn.Module, it is a {type(module)}"
@@ -454,12 +454,15 @@ def safe_init_weights(func):
         if p is None:
             logger.info(f"Module {type(module)} got no params, skipping init")
             return
+
+        # if using with torch.device('meta') to init, this will skip weight init,
+        # use it when only try to load weight (not training at all).
         elif str(p.device) == "meta":
             logger.debug(f"Module params are on meta device, skipping weight initialization")
             return
 
         # Init function
-        r = func(*args, **kwargs)
+        r = init_func(*args, **kwargs)
 
         return r
 

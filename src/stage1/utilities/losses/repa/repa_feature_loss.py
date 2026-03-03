@@ -28,7 +28,7 @@ from timm.layers.create_norm_act import get_norm_act_layer
 from torch import Tensor, is_tensor
 from torch.distributed.tensor import DTensor, Shard
 from torch.utils.checkpoint import checkpoint
-from torchvision.transforms import Normalize
+from torchvision.transforms import Normalize  # ty: ignore[unresolved-import]
 from transformers import (
     AutoModel,
     AutoProcessor,
@@ -456,426 +456,10 @@ def hier_distillation_loss(
 
 
 # *==============================================================
-# * Load DINOv2/v3 or PE models
+# * Load DINOv2/v3, Siglip or PE models
 # *==============================================================
 
 
-def _pe_model_multi_features_patcher(
-    self,
-    x: torch.Tensor,
-    norm: bool = False,
-    layer_idx: int | list[int] = -1,
-    strip_cls_token: bool = True,
-) -> Tensor | list[Tensor]:
-    """Forward method patcher for PE models"""
-    batch, _, h, w = x.shape
-    grid_h, grid_w = h // self.patch_size, w // self.patch_size
-    _is_multi_feats_out = isinstance(layer_idx, list)
-
-    x = self.conv1(x)
-    x = x.permute(0, 2, 3, 1).reshape(batch, -1, self.width)
-
-    if self.use_cls_token:
-        x = torch.cat(
-            [self.class_embedding.view(1, 1, -1).expand(batch, -1, -1), x],
-            dim=1,
-        )
-
-    if self.use_abs_posemb:
-        x = x + self._sample_abs_posemb(grid_h, grid_w)
-
-    if self.use_rope2d:
-        self.rope.update_grid(x.device, grid_h, grid_w)
-
-    x = self.ln_pre(x)
-
-    ###### Forward transformer layers
-    # x = self.transformer(x, layer_idx=layer_idx)
-    backbone = self.transformer
-    output_feats: list[Tensor] = []
-
-    if isinstance(layer_idx, int):
-        stop_idx = (backbone.layers + layer_idx) % backbone.layers
-    else:
-        # For list of layer indices, we need to go through all specified layers
-        stop_idx = max(layer_idx) if layer_idx else backbone.layers - 1
-
-    attn_mask = None
-    for i, r in enumerate(backbone.resblocks):
-        if backbone.grad_checkpointing and not torch.jit.is_scripting():
-            # TODO: handle kwargs https://github.com/pytorch/pytorch/issues/79887#issuecomment-1161758372
-            # x = checkpoint(r, x, attn_mask)
-            x = checkpoint(r, x, None, None, attn_mask)
-        else:
-            x = r(x, attn_mask=attn_mask)
-
-        # Collect features at specified layers
-        if _is_multi_feats_out:
-            assert isinstance(layer_idx, list)
-            if i in layer_idx:
-                output_feats.append(x)
-
-        if i == stop_idx:
-            break
-
-    if not _is_multi_feats_out:
-        return_feats: Tensor | list[Tensor] = x
-    else:
-        return_feats = output_feats
-
-    ######### Post ln norm
-    if norm:
-        if _is_multi_feats_out:
-            for i, feats in enumerate(return_feats):
-                return_feats[i] = self.ln_post(feats)
-        else:
-            return_feats = self.ln_post(return_feats)
-
-    if strip_cls_token and self.use_cls_token:
-        if _is_multi_feats_out:
-            for i, feats in enumerate(return_feats):
-                return_feats[i] = feats[:, 1:, :]
-        else:
-            return_feats_t = cast(Tensor, return_feats)
-            return_feats = return_feats_t[:, 1:, :]
-
-    return return_feats
-
-
-def load_perception_model(
-    weight_path: str | Path,
-    model_name: str = "PE-Core-L14-336",
-    pretrained_on: Literal["core", "lang", "spatial"] = "core",
-    compile=True,
-):
-    """
-    Load the Perception Encoder (PE) vision encoder (core / lang / spatial).
-
-    Reference: https://github.com/facebookresearch/perception_models
-
-    Supported `model_name` values (aligned with `VisionTransformer.available_configs()`):
-    - PE core:
-      - `PE-Core-G14-448`
-      - `PE-Core-L14-336`
-      - `PE-Core-B16-224`
-      - `PE-Core-S16-384`
-      - `PE-Core-T16-384`
-    - PE lang:
-      - `PE-Lang-G14-448`
-      - `PE-Lang-L14-448`
-      - `PE-Lang-G14-448-Tiling`
-      - `PE-Lang-L14-448-Tiling`
-    - PE spatial:
-      - `PE-Spatial-G14-448`
-      - `PE-Spatial-L14-448`
-      - `PE-Spatial-B16-512`
-      - `PE-Spatial-S16-512`
-      - `PE-Spatial-T16-512`
-
-    Notes:
-    - `weight_path` must point to the corresponding checkpoint (e.g. a local `*.pt`).
-    - This function patches `forward_features` to support multi-layer outputs via `layer_idx: list[int]`
-      (useful for hierarchical distillation).
-    """
-    sys.path.insert(0, "src/stage1/perception_models")
-    import core.vision_encoder.pe as pe  # ty: ignore[unresolved-import]
-
-    if model_name is None:
-        model_name = Path(weight_path).stem
-
-    visual_available_cfgs = pe.VisionTransformer.available_configs()
-    assert model_name in visual_available_cfgs, (
-        f"Model {model_name} not available. Available models are {visual_available_cfgs}"
-    )
-    assert weight_path is not None, "weight path should not be None when loading the perception encoder model"
-
-    # Load the model
-    # cfg = pe.PE_VISION_CONFIG[model_name]
-    model = pe.VisionTransformer.from_config(model_name, pretrained=True, checkpoint_path=str(weight_path))
-    logger.info(f"[PE Model]: Load model {model_name} with model_name {model_name}")
-
-    # Patch forward method to support multiple-layer feature output
-    model.forward_features = MethodType(_pe_model_multi_features_patcher, model)
-
-    if compile:
-        model = torch.compile(model, mode="reduce-overhead")
-        logger.info("[PE model]: Model compiled with reduce-overhead")
-
-    return model
-
-
-def load_repa_dino_v3_model(
-    weight_path: str | Path | None = None,
-    model_name: str | None = "dinov3_vitl16",
-    pretrained_on: Literal["satellite", "web"] = "satellite",
-    compile=True,
-) -> torch.nn.Module | torch._dynamo.OptimizedModule:
-    """
-    import torch
-
-    REPO_DIR = <PATH/TO/A/LOCAL/DIRECTORY/WHERE/THE/DINOV3/REPO/WAS/CLONED>
-
-    # DINOv3 ViT models pretrained on web images
-    dinov3_vits16 = torch.hub.load(REPO_DIR, 'dinov3_vits16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-    dinov3_vits16plus = torch.hub.load(REPO_DIR, 'dinov3_vits16plus', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-    dinov3_vitb16 = torch.hub.load(REPO_DIR, 'dinov3_vitb16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-    dinov3_vitl16 = torch.hub.load(REPO_DIR, 'dinov3_vitl16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-    dinov3_vith16plus = torch.hub.load(REPO_DIR, 'dinov3_vith16plus', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-    dinov3_vit7b16 = torch.hub.load(REPO_DIR, 'dinov3_vit7b16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-
-    # DINOv3 ConvNeXt models pretrained on web images
-    dinov3_convnext_tiny = torch.hub.load(REPO_DIR, 'dinov3_convnext_tiny', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-    dinov3_convnext_small = torch.hub.load(REPO_DIR, 'dinov3_convnext_small', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-    dinov3_convnext_base = torch.hub.load(REPO_DIR, 'dinov3_convnext_base', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-    dinov3_convnext_large = torch.hub.load(REPO_DIR, 'dinov3_convnext_large', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-
-    # DINOv3 ViT models pretrained on satellite imagery
-    dinov3_vitl16 = torch.hub.load(REPO_DIR, 'dinov3_vitl16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-    dinov3_vit7b16 = torch.hub.load(REPO_DIR, 'dinov3_vit7b16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
-
-    The pretrained weights are placed as follows:
-
-    src/stage1/utilities/losses/dinov3/weights
-    ├── remote_sensing_image_pretrained_SAT_493M
-    │   ├── dinov3_vit7b16_pretrain_sat493m-a6675841.pth
-    │   └── dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth
-    └── web_image_pretrained_lvd
-        ├── dinov3_convnext_base_pretrain_lvd1689m-801f2ba9.pth
-        ├── dinov3_convnext_large_pretrain_lvd1689m-61fa432d.pth
-        ├── dinov3_convnext_small_pretrain_lvd1689m-296db49d.pth
-        ├── dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth
-        ├── dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
-        ├── dinov3_vith16plus_pretrain_lvd1689m-7c1da9a5.pth
-        ├── dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
-        ├── dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
-        ├── dinov3_vits16_pretrain_lvd1689m-08c60483.pth
-        └── download_dinov3_weights.py
-    """
-    repo_dir = Path(__file__).parents[1] / "dinov3"
-    assert repo_dir.exists(), (
-        f"DINOv3 repo directory {repo_dir} does not exist. Please git clone from https://github.com/facebookresearch/dinov3"
-    )
-
-    if model_name is None and weight_path is not None:
-        stem = Path(weight_path).stem
-        model_name = "_".join(stem.split("_", 2))
-    elif weight_path is None and model_name is not None:
-        model_type_dir = {
-            "web": "web_image_pretrained_lvd",
-            "satellite": "remote_sensing_image_pretrained_SAT_493M",
-        }[pretrained_on]
-        weight_dir = repo_dir / "weights" / model_type_dir
-        # search the weight path
-        paths = weight_dir.rglob("*.pth")
-        for p in paths:
-            # avoid 'dinov3_vits16' and 'dinov3_vits16plus'
-            search_name = model_name + "_pretrain"
-            if search_name in p.stem:
-                weight_path = str(p)
-                break
-        assert weight_path is not None, f"can not find weight {model_name=} at {weight_dir}"
-    elif weight_path is None and model_name is None:
-        raise ValueError("Either model_name or weight_path must be specified.")
-
-    assert weight_path is not None, f"{weight_path=} does not exists"
-    logger.info(f"[Dino v3 in REPA]: use Dino v3 model: {model_name} loaded from {weight_path}.")
-    assert Path(weight_path).exists(), "Dino v3 model weight path does not exists"
-    sys.path.append(str(repo_dir))
-    dino_model = torch.hub.load(repo_dir, model_name, source="local", weights=weight_path)
-    dino_model = cast(nn.Module, dino_model)
-    if compile:
-        dino_model = torch.compile(dino_model, mode="reduce-overhead")
-        dino_model = cast(torch._dynamo.OptimizedModule, dino_model)
-        logger.info("[Dino v3 model]: compiled model done")
-    return dino_model
-
-
-def load_repa_dino_v2_model(
-    load_from: str = "torch",
-    model_name: str = "dinov2_vitb14",
-    weight_path: str | Path | None = None,
-    compile=True,
-) -> torch.nn.Module:
-    # This is Dino v2 models
-    if load_from == "timm":
-        model = timm.create_model(
-            model_name,  # "hf-hub:timm/vit_large_patch14_dinov2.lvd142m",
-            pretrained=True,
-            dynamic_img_size=True,
-        )
-    elif load_from == "torch":  # vit base
-        # TODO: add the local weight path
-        model = torch.hub.load("facebookresearch/dinov2", model_name)
-        model = cast(nn.Module, model)
-    else:
-        raise ValueError(f"Unknown model loading source {load_from}, must be 'torch' or 'timm'.")
-    if compile:
-        model = torch.compile(model)
-        logger.info("[Dino v2 model]: compiled model done")
-    return model  # type: ignore[return-value]
-
-
-def _siglip_vit_encoder_forward_features_patcher(
-    self,
-    inputs_embeds,
-    attention_mask: Optional[torch.Tensor] = None,
-    **kwargs,
-):
-    output_last_hs = kwargs.pop("output_hidden_states", False)
-    intermidate_layer_indices = []
-    features = []
-
-    global SIGLIP2_FEATURE_INDEX
-    if output_last_hs:
-        intermidate_layer_indices = SIGLIP2_FEATURE_INDEX
-        assert intermidate_layer_indices is not None, "Siglip2 feature index is not set"
-
-    hidden_states = inputs_embeds
-    for i, encoder_layer in enumerate(self.layers):
-        hidden_states = encoder_layer(hidden_states, attention_mask, **kwargs)
-        if output_last_hs and i in intermidate_layer_indices:
-            features.append(hidden_states)
-    assert len(features) == len(intermidate_layer_indices), (
-        f"Extracted features do not match expected {len(intermidate_layer_indices)=} but got {len(features)=}"
-    )
-    return BaseModelOutput(last_hidden_state=hidden_states, hidden_states=tuple(features))
-
-
-def _siglip_vit_forward_features_patcher(
-    self, pixel_values, interpolate_pos_encoding: Optional[bool] = False, **kwargs
-):
-    hidden_states = self.embeddings(pixel_values, interpolate_pos_encoding=interpolate_pos_encoding)
-
-    encoder_outputs: BaseModelOutput = self.encoder(
-        inputs_embeds=hidden_states,
-        **kwargs,
-    )
-
-    last_hidden_state = encoder_outputs.last_hidden_state
-    last_hidden_state = self.post_layernorm(last_hidden_state)
-
-    pooler_output = self.head(last_hidden_state) if self.use_head else None
-
-    return BaseModelOutputWithPooling(
-        hidden_states=encoder_outputs.hidden_states,  # add hidden_states here
-        last_hidden_state=last_hidden_state,
-        pooler_output=pooler_output,
-    )
-
-
-def load_siglip2_model(
-    name="google/siglip2-so400m-patch16-naflex",
-    use_bnb=False,
-    attn_implem="sdpa",  # 'sdpa' or 'flash_attention_2'
-    use_automodel=True,
-    cache_dir=None,
-    local_files_only=True,
-) -> tuple[Siglip2VisionTransformer, SiglipProcessor]:
-    if use_bnb:
-        bnb_config = BitsAndBytesConfig(load_in_4bit=True)
-    else:
-        bnb_config = None
-
-    if not use_automodel:
-        # model, processor = None, None
-        raise NotImplementedError("Directly load from Siglip2 class is not implemented yet")
-    else:
-        if cache_dir is None:
-            # default cache dir
-            cache_dir = Path.home() / ".cache/huggingface/hub"
-        model = AutoModel.from_pretrained(
-            name,
-            quantization_config=bnb_config,
-            device_map="auto",
-            cache_dir=cache_dir,
-            attn_implementation=attn_implem,
-            local_files_only=local_files_only,
-        )
-        # remove the text model
-        model.text_model = None
-        vision_model = model.vision_model
-        processor = AutoProcessor.from_pretrained(name, cache_dir=cache_dir, local_files_only=local_files_only)
-
-    model = cast(Siglip2VisionModel, model)
-
-    global SIGLIP2_FEATURE_INDEX
-    SIGLIP2_FEATURE_INDEX = SIGLIP2_INTERACTION_INDEXES[name]
-    logger.info(f"[Siglip2]: using feature index {SIGLIP2_FEATURE_INDEX=}")
-
-    # Override the forward_features method
-    vision_model.encoder.forward = MethodType(_siglip_vit_encoder_forward_features_patcher, vision_model.encoder)
-    logger.info("[Siglip2]: override forward_features method for Siglipv2 ViT encoder")
-    if "naflex" not in name:
-        vision_model.forward = MethodType(_siglip_vit_forward_features_patcher, vision_model)
-        logger.info("[Siglip2]: override forward method for Siglipv2 ViT")
-
-    return vision_model, processor  # type: ignore[return-value]
-
-
-def _siglip_processor_patcher(
-    processor: SiglipProcessor,
-    interp_pe=False,
-    size: dict | int | None = None,
-    do_resize: bool | None = None,
-    max_num_patches: int | None = None,
-):
-    if size is not None:
-        if isinstance(size, int):
-            size = {"height": size, "width": size}
-        processor.image_processor.size = size
-    if do_resize is not None:
-        processor.image_processor.do_resize = do_resize
-
-    # the image should be [0, 1] and not to rescale
-    processor.image_processor.do_rescale = False
-
-    def _processor(*args, **kwargs):
-        if max_num_patches is not None:
-            kwargs["max_num_patches"] = max_num_patches
-
-        kwargs.setdefault("return_tensors", "pt")
-        inputs = processor(*args, **kwargs)
-        inputs["attention_mask"] = inputs.pop("pixel_attention_mask", None)
-        if interp_pe:
-            inputs["interpolate_pos_encoding"] = True
-        return inputs
-
-    return _processor
-
-
-def load_repa_encoder(
-    repa_name: str = "dinov2",
-    model_name: str = "dinov2_vitb14",
-    weight_path: str | Path | None = None,
-    *,
-    load_from="torch",
-    dino_v3_pretrained_on: Literal["satellite", "web"] = "satellite",
-    compile=True,
-):
-    if repa_name == "dinov2":
-        return load_repa_dino_v2_model(load_from, model_name, weight_path, compile)
-    elif repa_name == "dinov3":
-        return load_repa_dino_v3_model(
-            weight_path,
-            model_name,
-            pretrained_on=dino_v3_pretrained_on,
-            compile=compile,
-        )
-    elif repa_name == "pe":
-        assert weight_path is not None, "weight_path should not be None when loading PE model"
-        pe_model = load_perception_model(weight_path, model_name, compile=compile)
-        return pe_model
-    elif repa_name == "siglip2":
-        # assert weight_path is not None, (
-        #     "weight_path should not be None when loading Siglip2 model"
-        # )
-        model, processor = load_siglip2_model(model_name)
-        return model, processor
-    else:
-        raise ValueError(f"Unknown DINO/PE version {repa_name}")
-
-
-# Rebind legacy helper names to the shared teacher adapter implementations.
 load_perception_model = _load_perception_model_impl
 load_repa_dino_v3_model = _load_repa_dino_v3_model_impl
 load_repa_dino_v2_model = _load_repa_dino_v2_model_impl
@@ -913,6 +497,7 @@ class REPALoss(torch.nn.Module):
         dino_load_type: str = "torch",  # [torch, timm]
         dino_version: int = 3,
         dino_pretrained_on: str | Literal["satellite", "web"] | None = "satellite",
+        dino_repo_path: str | Path | None = None,
     ):
         super().__init__()
         self.rgb_channels = rgb_channels
@@ -966,6 +551,7 @@ class REPALoss(torch.nn.Module):
             repa_encoder=repa_encoder,
             dino_load_type=self.dino_type,
             dino_pretrained_on=cast(Literal["satellite", "web"], dino_pretrained_on),
+            dino_repo_path=dino_repo_path,
             c_dim_first=c_dim_first,
             img_is_neg1_1=img_is_neg1_1,
             rgb_channels=cast(list[int] | str | None, rgb_channels),
@@ -991,6 +577,7 @@ class REPALoss(torch.nn.Module):
                 encoder.embed_dim,
                 is_1d=not c_dim_first,
             )
+            logger.warning(f"Create projector (teacher -> student), make sure put params in optimizer")
             logger.warning(
                 "build repa loss in loss class, remember to optimize the projector, "
                 "or match to repa dim in model forward",
@@ -1131,9 +718,7 @@ class REPALoss(torch.nn.Module):
         # 1. interpolate
         teacher_feat = ensure_feature_list(teacher_feat)
         student_feat = ensure_feature_list(student_feat)
-        teacher_feat, student_feat = self._interp_teacher_or_student_features(  # type: ignore
-            teacher_feat, student_feat
-        )
+        teacher_feat, student_feat = self._interp_teacher_or_student_features(teacher_feat, student_feat)
 
         # 2. dino feature -> Featup -> model feature
         # TODO: use featup to upsample the dino feature into (high-resolution) model (or says)
@@ -1245,7 +830,7 @@ class REPALoss(torch.nn.Module):
             pass
 
         if to_dt:
-            dm = self.repa_encoder.patch_embed.proj.weight.device_mesh  # type: ignore
+            dm = self.repa_encoder.patch_embed.proj.weight.device_mesh
             img = DTensor.from_local(img, dm, placements=(Shard(0),))  # ty: ignore[invalid-argument-type]
 
         return img
@@ -1269,9 +854,14 @@ class PhiSMultipleTeacherDistillLoss(nn.Module):
         repa_img_size: int = 224,
         dino_load_type: Literal["torch", "timm"] = "torch",
         dino_pretrained_on: Literal["satellite", "web"] = "satellite",
+        dino_repo_path: str | Path | None = None,
         phi_loss_type: Literal["mse", "smoothl1"] = "mse",
         phi_eps: float = 1e-6,
         hadamard_allow_approx: bool = True,
+        phi_cache_path: str | Path | None = None,
+        phi_cache_required: bool = False,
+        phi_cache_broadcast: bool = True,
+        phi_cache_load_on_init: bool = True,
     ) -> None:
         super().__init__()
         if len(teacher_configs) == 0:
@@ -1301,7 +891,6 @@ class PhiSMultipleTeacherDistillLoss(nn.Module):
         )
 
         adapters: dict[str, Any] = {}
-        encoder_modules: dict[str, nn.Module] = {}
         for teacher_name, cfg in teacher_configs.items():
             cfg_local = dict(cfg)
             repa_model_type = str(cfg_local.pop("repa_model_type", "dinov3"))
@@ -1310,6 +899,7 @@ class PhiSMultipleTeacherDistillLoss(nn.Module):
             repa_encoder = cfg_local.pop("repa_encoder", None)
             teacher_dino_load_type = str(cfg_local.pop("dino_load_type", dino_load_type))
             teacher_dino_pretrained_on = str(cfg_local.pop("dino_pretrained_on", dino_pretrained_on))
+            teacher_dino_repo_path = cfg_local.pop("dino_repo_path", cfg_local.pop("repa_repo_path", dino_repo_path))
             teacher_rgb_channels = cfg_local.pop("rgb_channels", rgb_channels)
             teacher_img_resize = cfg_local.pop("img_resize", img_resize)
             teacher_img_is_neg1_1 = bool(cfg_local.pop("img_is_neg1_1", img_is_neg1_1))
@@ -1323,6 +913,7 @@ class PhiSMultipleTeacherDistillLoss(nn.Module):
                 repa_encoder=repa_encoder,
                 dino_load_type=teacher_dino_load_type,
                 dino_pretrained_on=cast(Literal["satellite", "web"], teacher_dino_pretrained_on),
+                dino_repo_path=cast(str | Path | None, teacher_dino_repo_path),
                 c_dim_first=c_dim_first,
                 img_is_neg1_1=teacher_img_is_neg1_1,
                 rgb_channels=cast(list[int] | str | None, teacher_rgb_channels),
@@ -1332,7 +923,6 @@ class PhiSMultipleTeacherDistillLoss(nn.Module):
                 pca_fn=feature_pca_torch if teacher_rgb_channels == "pca" else None,
             )
             adapters[teacher_name] = adapter
-            encoder_modules[teacher_name] = adapter.encoder
 
         if set(adapters.keys()) != set(self.teacher_dims.keys()):
             raise ValueError(
@@ -1340,10 +930,60 @@ class PhiSMultipleTeacherDistillLoss(nn.Module):
             )
 
         self.teacher_adapters = adapters
-        self.teacher_encoders = nn.ModuleDict(encoder_modules)
         self.teacher_processors: dict[str, Any] = {
             key: adapter.processor for key, adapter in self.teacher_adapters.items() if adapter.processor is not None
         }
+        self._maybe_load_phi_cache(
+            phi_cache_path=phi_cache_path,
+            phi_cache_required=phi_cache_required,
+            phi_cache_broadcast=phi_cache_broadcast,
+            phi_cache_load_on_init=phi_cache_load_on_init,
+        )
+
+    def _maybe_load_phi_cache(
+        self,
+        *,
+        phi_cache_path: str | Path | None,
+        phi_cache_required: bool,
+        phi_cache_broadcast: bool,
+        phi_cache_load_on_init: bool,
+    ) -> None:
+        if not phi_cache_load_on_init:
+            return
+
+        if phi_cache_path is None or str(phi_cache_path).strip() == "":
+            if phi_cache_required:
+                raise ValueError(
+                    "PhiS cache is required but `phi_cache_path` is empty. "
+                    "Please set `vq_loss.phis_loss_options.phi_cache_path`."
+                )
+            return
+
+        cache_path = Path(str(phi_cache_path)).expanduser().resolve()
+        if not cache_path.exists():
+            if phi_cache_required:
+                raise FileNotFoundError(f"PhiS cache path does not exist: {cache_path}")
+            logger.warning(f"[PhiS]: skip loading missing cache path: {cache_path}")
+            return
+
+        self.load_phi_from_cache(cache_path, broadcast=phi_cache_broadcast)
+        logger.info(f"[PhiS]: loaded cache from {cache_path}")
+
+    def move_teachers_to(self, device: torch.device, dtype: torch.dtype | None = None) -> None:
+        for teacher_name, adapter in self.teacher_adapters.items():
+            encoder = adapter.encoder
+            encoder.eval()
+            encoder.requires_grad_(False)
+
+            hf_device_map = getattr(encoder, "hf_device_map", None)
+            if hf_device_map is not None:
+                logger.info(f"[PhiS]: skip moving sharded teacher `{teacher_name}` with hf_device_map")
+                continue
+
+            if dtype is None:
+                encoder.to(device=device)
+            else:
+                encoder.to(device=device, dtype=dtype)
 
     def _interp_teacher_or_student_features(
         self,
@@ -1455,7 +1095,8 @@ class PhiSMultipleTeacherDistillLoss(nn.Module):
         self.phi_loss.save_phi_to_cache(cache_path)
 
     def forward(self, img: Tensor, student_feature: dict[str, Tensor | list[Tensor]]) -> Tensor:
-        teacher_feats = self._encode_teachers(img, detach=True)
+        with torch.no_grad():
+            teacher_feats = self._encode_teachers(img, detach=True)
         student_feats = self._prepare_student_feats(student_feature)
         teacher_feats, student_feats = self._align_teacher_student(teacher_feats, student_feats)
         return self.phi_loss(student_feats, teacher_feats)
@@ -1747,7 +1388,7 @@ def test_dinov3_pca():
     x = torch.as_tensor(np.array(img), dtype=torch.float32)
     x = x.permute(2, 0, 1)[None] / 255.0
     # norm using imagenet mean and std
-    from torchvision.transforms import Normalize
+    from torchvision.transforms import Normalize  # ty: ignore[unresolved-import]
 
     norm = Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
     x = norm(x)
@@ -1946,7 +1587,7 @@ if __name__ == "__main__":
     from rich.traceback import install
 
     lt.monkey_patch()
-    install(show_locals=True, code_width=120, width=200)
+    install(show_locals=True, width=200)
 
     # test_gram_loss()
     # test_siglip2_model()

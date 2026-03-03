@@ -1,8 +1,3 @@
-hydra:
-  output_subdir: null
-  run:
-    dir: .
-
 defaults:
   # tokenizer ==========
   - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
@@ -12,10 +7,16 @@ defaults:
   - vq_loss: remote_clip_RN50
   # self ============
   - _self_
+  - hydra: base
 
   # hydra overrides ====
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
+
+hydra:
+  run:
+    dir: runs/stage1_cosmos_hybrid/${now:%Y-%m-%d}/${now:%H-%M-%S}_${train.log.run_comment}
+  output_subdir: hydra_config
 
 accelerator:
   gradient_accumulation_plugin:
@@ -146,7 +147,7 @@ ema:
 
 train:
   tokenizer_name: hybrid_cosmos_f8c${tokenizer.cnn_cfg.model.latent_channels}p${tokenizer.cnn_cfg.model.patch_size}
-  proj_dir: runs/stage1_cosmos_hybrid
+  proj_dir: null
   finetune_strategy: finetune_all # [finetune_all, decoder_only, peft]
   max_grad_norm: 0.08
   track_metrics: false

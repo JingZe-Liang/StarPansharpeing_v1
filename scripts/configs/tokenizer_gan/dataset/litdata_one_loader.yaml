@@ -226,7 +226,6 @@ val_loader:
       bigearth_13bands_chw_128:
         - ["data2/BigEarthNet_S2/LitData_hyper_images"]
         - resize_before_transform: 128
-
           is_hwc: false
 
       32bands_512:

@@ -384,7 +384,7 @@ class TokenizerHybridUNet(nn.Module):
         logger.info(f"Tokenizer training mode: {'probe (frozen tokenizer)' if self.freeze_tokenizer else 'finetune'}")
 
         # Load DINOv3 backbone
-        tok_backbone = CosmosHybridTokenizer.create_model(
+        tok_backbone: CosmosHybridTokenizer = CosmosHybridTokenizer.create_model(
             cnn_cfg=t_cfg.cnn_cfg,
             trans_enc_cfg=t_cfg.trans_enc_cfg,
             trans_dec_cfg=t_cfg.trans_dec_cfg,

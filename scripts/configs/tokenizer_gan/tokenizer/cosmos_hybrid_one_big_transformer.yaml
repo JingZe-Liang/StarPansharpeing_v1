@@ -10,8 +10,8 @@ _target_: src.stage1.cosmos.cosmos_hybrid.CosmosHybridTokenizer.create_model
 cnn_cfg:
   model:
     resolution: 1024
-    in_channels: 512 # nested channels !!
-    out_channels: 512 # nested channels !!
+    in_channels: 512
+    out_channels: 512
     z_channels: 768
     latent_channels: 32
     channels: 128
@@ -22,7 +22,7 @@ cnn_cfg:
     spatial_compression: 8
     patch_size: 1
     block_name: res_block
-    norm_type: rmsnorm2d #gn
+    norm_type: rmsnorm2dfp32 #gn
     act_type: silu
     adaptive_mode: interp
     downsample_kwargs:

@@ -14,7 +14,7 @@ tokenizer:
       spatial_compression: 8
       patch_size: 1
       block_name: res_block
-      norm_type: rmsnorm2d
+      norm_type: rmsnorm2dfp32
       act_type: silu
       norm_groups: 32
       adaptive_mode: interp

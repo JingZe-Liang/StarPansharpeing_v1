@@ -80,7 +80,6 @@ from .rope import (
 )
 from .variants.cross_attn import CrossAttention
 from .variants.mlp import SwiGLU
-from .moe import MoEFFN
 
 JVP_FLASH_ATTN_ENABLED = False
 try:
@@ -691,6 +690,8 @@ class AttentionBlock(nn.Module):
                 is_fused=fused_type,
             )
         elif ffn_type == "moe":
+            from .moe.moe_megatron import MoEFFN
+
             moe_kwargs = moe_kwargs or {}
             # num_layers is required by MoEFFN/TransformerConfig
             num_layers = moe_kwargs.pop("num_layers", 12)

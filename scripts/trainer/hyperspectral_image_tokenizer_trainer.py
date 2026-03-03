@@ -40,6 +40,7 @@ from torch.distributed.tensor import DTensor
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from tqdm import trange
+from hydra.core.hydra_config import HydraConfig
 
 from src.data.hyperspectral_loader import get_hyperspectral_img_loaders_with_different_backends
 from src.data import _TimedLoaderIterator
@@ -63,7 +64,7 @@ from src.stage1.utilities.train.network import (
 )
 from src.utilities.config_utils import to_easydict_recursive
 from src.utilities.config_utils import to_object as to_cont
-from src.utilities.logging import log_print, set_logger_file, get_python_pkg_env, zip_code_into_dir
+from src.utilities.logging import log_print, set_logger_file, get_python_pkg_env, zip_code_into_dir, logger
 from src.utilities.network_utils.compile import model_compiled_flag
 from src.utilities.network_utils import load_fsdp_model, safe_dtensor_operation
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
@@ -183,6 +184,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # GAN, perceptual losses
         self.vq_loss_fn: VQLPIPSWithDiscriminator = hydra.utils.instantiate(cfg.vq_loss).to(self.device)
+        self._use_disc = bool(self.vq_loss_fn.use_disc)
+        self.log_msg(f"[Trainer]: discriminator enabled={self._use_disc}")
 
         # Visual pretraining proxy task models, e.g, contrastive learning teacher model;
         # JEPA predictor model ...
@@ -209,8 +212,10 @@ class CosmosHyperspectralTokenizerTrainer:
         if self.train_cfg.compile_model:
             self.tokenizer = torch.compile(self.tokenizer)  # type: ignore[invalid-assignment]
             self.log_msg(f"Compiled tokenizer {self.tokenizer.__class__.__name__}")
-            self.vq_loss_fn.discriminator = torch.compile(self.vq_loss_fn.discriminator)
-            self.log_msg(f"Compiled discriminator {self.vq_loss_fn.discriminator.__class__.__name__}")
+            if self._use_disc:
+                assert self.vq_loss_fn.discriminator is not None, "discriminator should not be None when use_disc=True"
+                self.vq_loss_fn.discriminator = torch.compile(self.vq_loss_fn.discriminator)
+                self.log_msg(f"Compiled discriminator {self.vq_loss_fn.discriminator.__class__.__name__}")
 
             # no donated buffers
             if self.cfg.vq_loss.gen_loss_weight is None:
@@ -456,14 +461,17 @@ class CosmosHyperspectralTokenizerTrainer:
         raise NotImplementedError(f"Invariant pipeline is not implemented yet")
 
     def prepare_ema_models(self):
+        self.ema_vq_disc = None
         if self.no_ema:
             return
 
         ema_partial = hydra.utils.instantiate(self.cfg.ema)
         self.ema_tokenizer: EMA = ema_partial(self.tokenizer).to(self.device)
 
-        # Disc need ema?
-        self.ema_vq_disc = ema_partial(self.vq_loss_fn.discriminator).to(self.device)
+        # Disc EMA
+        if self._use_disc:
+            assert self.vq_loss_fn.discriminator is not None, "discriminator should not be None when use_disc=True"
+            self.ema_vq_disc = ema_partial(self.vq_loss_fn.discriminator).to(self.device)
 
         if self.proxy_model is not None:
             ...
@@ -475,14 +483,24 @@ class CosmosHyperspectralTokenizerTrainer:
     def configure_logger(self):
         self.logger = logger
 
-        log_file = Path(self.train_cfg.proj_dir)
-        if self.train_cfg.log.log_with_time:
-            str_time = time.strftime("%Y-%m-%d_%H-%M-%S")
-            log_file = log_file / str_time
-        if self.train_cfg.log.run_comment is not None:
-            log_file = Path(log_file.as_posix() + "_" + self.train_cfg.log.run_comment)
-        log_file = log_file / "log.log"
-        # log_file.parent.mkdir(parents=True, exist_ok=True)
+        configured_proj_dir = getattr(self.train_cfg, "proj_dir", None)
+        use_configured_proj_dir = configured_proj_dir not in (None, "")
+        if use_configured_proj_dir:
+            configured_proj_dir_str = str(configured_proj_dir)
+            log_root = Path(configured_proj_dir_str)
+            if self.train_cfg.log.log_with_time:
+                str_time = time.strftime("%Y-%m-%d_%H-%M-%S")
+                log_root = log_root / str_time
+            if self.train_cfg.log.run_comment is not None:
+                log_root = Path(log_root.as_posix() + "_" + self.train_cfg.log.run_comment)
+        else:
+            # configured log dir by hydra
+            hydra_cfg = HydraConfig.get()
+            log_root = Path(hydra_cfg.runtime.output_dir)
+            self.logger.info(f"[Hydra]: use runtime output dir as log root: {log_root}")
+
+        log_file = log_root / "log.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
 
         # when distributed, there should be the same log_file
         if self.accelerator.use_distributed:
@@ -802,6 +820,9 @@ class CosmosHyperspectralTokenizerTrainer:
         raise ValueError(f"Unknown training/finetuning strategy {ft_strategy}")
 
     def _get_disc_params(self, for_optimizer=False, with_name: bool = False):
+        if not self._use_disc:
+            raise RuntimeError("discriminator is disabled, can not query discriminator params")
+        assert self.vq_loss_fn.discriminator is not None, "discriminator should not be None when use_disc=True"
         if not for_optimizer:
             if with_name:
                 return dict(self.vq_loss_fn.discriminator.named_parameters())
@@ -852,12 +873,17 @@ class CosmosHyperspectralTokenizerTrainer:
                 self._get_tokenizer_params,
                 getattr(self.train_cfg, "tokenizer_no_wd_params", None),
             )
-            disc_optim = _optimizer_creater(
-                self.train_cfg.disc_optimizer, self._get_disc_params, getattr(self.train_cfg, "disc_no_wd_params", None)
-            )
+            if self._use_disc:
+                disc_optim = _optimizer_creater(
+                    self.train_cfg.disc_optimizer,
+                    self._get_disc_params,
+                    getattr(self.train_cfg, "disc_no_wd_params", None),
+                )
+            else:
+                disc_optim = None
         else:
             tokenizer_optim = DummyOptim([{"params": self._get_tokenizer_params()}])
-            disc_optim = DummyOptim([{"params": self._get_disc_params()}])
+            disc_optim = DummyOptim([{"params": self._get_disc_params()}]) if self._use_disc else None
 
         # schedulers
         if (
@@ -865,14 +891,17 @@ class CosmosHyperspectralTokenizerTrainer:
             or "scheduler" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
         ):
             tokenizer_sched = hydra.utils.instantiate(self.train_cfg.tokenizer_sched)(optimizer=tokenizer_optim)
-            disc_sched = hydra.utils.instantiate(self.train_cfg.disc_sched)(optimizer=disc_optim)
+            disc_sched = (
+                hydra.utils.instantiate(self.train_cfg.disc_sched)(optimizer=disc_optim) if self._use_disc else None
+            )
         else:
             tokenizer_sched = DummyScheduler(tokenizer_optim)
-            disc_sched = DummyScheduler(disc_optim)
+            disc_sched = DummyScheduler(disc_optim) if self._use_disc else None
 
         # set the heavyball optimizer without torch compiling
         is_heavyball_opt = lambda opt: opt.__class__.__module__.startswith("heavyball")
-        if (is_heavyball_opt(tokenizer_optim) or is_heavyball_opt(disc_optim)) and disable_heavyball_compile:
+        disc_is_heavyball = is_heavyball_opt(disc_optim) if disc_optim is not None else False
+        if (is_heavyball_opt(tokenizer_optim) or disc_is_heavyball) and disable_heavyball_compile:
             self.log_msg("Use heavyball optimizer, disable the optimization", level="WARNING")
 
         return tokenizer_optim, tokenizer_sched, disc_optim, disc_sched
@@ -904,11 +933,16 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def prepare_for_training(self):
         # FIXME: FSDP2 seems do not support the sync_bn, find a way to fix it.
-        if self._is_fsdp or self.accelerator.distributed_type in (
-            accelerate.utils.DistributedType.MULTI_GPU,
-            accelerate.utils.DistributedType.FSDP,
+        if self._use_disc and (
+            self._is_fsdp
+            or self.accelerator.distributed_type
+            in (
+                accelerate.utils.DistributedType.MULTI_GPU,
+                accelerate.utils.DistributedType.FSDP,
+            )
         ):  # seems that FSDP does not support synchronized batchnorm
             # discriminator may have batch norm layer
+            assert self.vq_loss_fn.discriminator is not None, "discriminator should not be None when use_disc=True"
             self.vq_loss_fn.discriminator = nn.SyncBatchNorm.convert_sync_batchnorm(self.vq_loss_fn.discriminator)
             self.log_msg("[Model] convert discriminator to sync batch norm")
 
@@ -916,7 +950,9 @@ class CosmosHyperspectralTokenizerTrainer:
         # if use FSDP2
         if self._is_fsdp and self.accelerator.is_fsdp2:
             self.tokenizer.dtype = torch.float  # self.dtype
-            self.vq_loss_fn.discriminator.dtype = self.dtype  # type: ignore[invalid-assignment]
+            if self._use_disc:
+                assert self.vq_loss_fn.discriminator is not None, "discriminator should not be None when use_disc=True"
+                self.vq_loss_fn.discriminator.dtype = self.dtype  # type: ignore[invalid-assignment]
 
         ########### Tokenizer, Quantizer, Discriminator preparation ###########
         # tokenizer
@@ -924,12 +960,15 @@ class CosmosHyperspectralTokenizerTrainer:
         # self.tokenizer = self.set_fsdp_cpu_local_tensor_to_each_rank(self.tokenizer)
 
         # discriminator
-        (self.vq_loss_fn.discriminator, self.disc_optim) = self.accelerator.prepare(
-            self.vq_loss_fn.discriminator, self.disc_optim
-        )
-        # self.vq_loss_fn.discriminator = self.set_fsdp_cpu_local_tensor_to_each_rank(
-        #     self.vq_loss_fn.discriminator
-        # )
+        if self._use_disc:
+            assert self.vq_loss_fn.discriminator is not None, "discriminator should not be None when use_disc=True"
+            assert self.disc_optim is not None, "disc_optim should not be None when use_disc=True"
+            (self.vq_loss_fn.discriminator, self.disc_optim) = self.accelerator.prepare(
+                self.vq_loss_fn.discriminator, self.disc_optim
+            )
+            # self.vq_loss_fn.discriminator = self.set_fsdp_cpu_local_tensor_to_each_rank(
+            #     self.vq_loss_fn.discriminator
+            # )
 
         # augmentation network
         if self.use_training_aug and self.antideg_net is not None:
@@ -944,7 +983,11 @@ class CosmosHyperspectralTokenizerTrainer:
         # )
 
         # Schedulers
-        (self.tokenizer_sched, self.disc_sched) = self.accelerator.prepare(self.tokenizer_sched, self.disc_sched)
+        if self._use_disc:
+            assert self.disc_sched is not None, "disc_sched should not be None when use_disc=True"
+            (self.tokenizer_sched, self.disc_sched) = self.accelerator.prepare(self.tokenizer_sched, self.disc_sched)
+        else:
+            self.tokenizer_sched = self.accelerator.prepare(self.tokenizer_sched)
 
         # Proxy model
         if self.proxy_model is not None:
@@ -1000,6 +1043,10 @@ class CosmosHyperspectralTokenizerTrainer:
             self.ema_tokenizer.update()
 
         elif mode == "disc":
+            if not self._use_disc:
+                return
+            if self.ema_vq_disc is None:
+                raise RuntimeError("ema_vq_disc is None while discriminator mode update is requested.")
             self.ema_vq_disc.update()
 
         elif mode == "proxy":
@@ -1405,6 +1452,16 @@ class CosmosHyperspectralTokenizerTrainer:
             assert vf_feature is not None, "vf_feature is None"
             out_d["vf_feature"] = vf_feature
 
+        if getattr(self.vq_loss_fn, "use_phis", False):
+            get_repa_feature_dict = getattr(_unwrap_tok, "get_repa_feature_dict", None)
+            if not callable(get_repa_feature_dict):
+                raise AttributeError(
+                    "PhiS is enabled in vq_loss_fn but tokenizer does not implement get_repa_feature_dict(force_to=...)."
+                )
+            phis_student_feature = get_repa_feature_dict(force_to=True)
+            assert phis_student_feature is not None, "phis_student_feature is None when PhiS is enabled."
+            out_d["phis_student_feature"] = phis_student_feature
+
         return out_d
 
     def forward_discriminator(
@@ -1415,7 +1472,14 @@ class CosmosHyperspectralTokenizerTrainer:
         split: str = "train",
         ema: bool = False,
     ):
+        if not self._use_disc and not train_tokenizer:
+            raise RuntimeError("discriminator is disabled, can not run discriminator-only forward.")
+        if ema and not self._use_disc:
+            raise RuntimeError("discriminator is disabled, can not run EMA discriminator forward.")
+
         if ema:
+            if self.ema_vq_disc is None:
+                raise RuntimeError("ema_vq_disc is None while EMA discriminator forward is requested.")
             _non_ema_disc = self.vq_loss_fn.discriminator
             self.vq_loss_fn.discriminator = self.ema_vq_disc.ema_model
 
@@ -1439,8 +1503,10 @@ class CosmosHyperspectralTokenizerTrainer:
                     q_loss_total=out_d.get("q_loss", None),
                     q_loss_breakdown=out_d.get("q_info", None),
                     latent=out_d.get("latent", None),
+                    # repa / vf / phi-s feature distillation
                     tokenizer_feat=repa_low_lvl_feat,
                     tokenizer_feat2=semantic_feat,
+                    phis_student_feature=out_d.get("phis_student_feature", None),
                     last_layer=self.get_last_layer(mode="dec"),
                     enc_last_layer=self.get_last_layer(mode="enc"),
                     global_step=self.global_step,
@@ -1448,6 +1514,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     add_prefix=False,
                     split=split,
                 )
+
                 if train_tokenizer:
                     loss = disc_train_loss_d["gen_loss"] + disc_train_loss_d["q_loss"]
                 else:
@@ -1459,6 +1526,39 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return loss, log_disc
 
+    def forward_generator_only(
+        self,
+        x: torch.Tensor,
+        out_d: dict,
+        split: str = "train",
+    ) -> tuple[torch.Tensor, dict]:
+        repa_low_lvl_feat = semantic_feat = None
+        if (repa_low_lvl_feat := out_d.get("repa_feature", None)) is None:
+            repa_low_lvl_feat = out_d.get("vf_feature", None)
+        if "semantic_feature" in out_d:
+            semantic_feat = out_d.get("semantic_feature", None)
+
+        with self.accelerator.autocast():
+            with self._record_time("gen_loss_forward"):
+                gen_loss_d, log_gen = self.vq_loss_fn(
+                    inputs=x,
+                    reconstructions=out_d["recon"],
+                    q_loss_total=out_d.get("q_loss", None),
+                    q_loss_breakdown=out_d.get("q_info", None),
+                    latent=out_d.get("latent", None),
+                    tokenizer_feat=repa_low_lvl_feat,
+                    tokenizer_feat2=semantic_feat,
+                    phis_student_feature=out_d.get("phis_student_feature", None),
+                    last_layer=self.get_last_layer(mode="dec"),
+                    enc_last_layer=self.get_last_layer(mode="enc"),
+                    global_step=self.global_step,
+                    optimizer_idx=0,
+                    add_prefix=False,
+                    split=split,
+                )
+                loss = gen_loss_d["gen_loss"] + gen_loss_d["q_loss"]
+        return loss, log_gen
+
     def get_global_step(self, mode="train"):
         assert mode in ("train",), "Only train mode is supported for now."
         return self.train_state[mode]
@@ -1468,6 +1568,8 @@ class CosmosHyperspectralTokenizerTrainer:
         return self.get_global_step("train")
 
     def may_freeze(self, model, freeze=True):
+        if model is None:
+            return
         model.requires_grad_(not freeze)
 
     @no_type_check
@@ -1551,11 +1653,13 @@ class CosmosHyperspectralTokenizerTrainer:
         *,
         proxy_aug_future: ProxyAugFuture | None = None,
     ):
-        # freeze discriminator
-        self.may_freeze(self.vq_loss_fn.discriminator, True)
-
-        # quantizer loss sent to discriminator
-        gen_loss, log_losses = self.forward_discriminator(x, tok_dict, train_tokenizer=True, split="train")
+        if self._use_disc:
+            # freeze discriminator
+            self.may_freeze(self.vq_loss_fn.discriminator, True)
+            # quantizer loss sent to discriminator
+            gen_loss, log_losses = self.forward_discriminator(x, tok_dict, train_tokenizer=True, split="train")
+        else:
+            gen_loss, log_losses = self.forward_generator_only(x, tok_dict, split="train")
 
         # deep supervision loss
         if "deep_supervision_outputs" in tok_dict:
@@ -1636,11 +1740,14 @@ class CosmosHyperspectralTokenizerTrainer:
         return gen_loss, log_losses, proxy_out
 
     def train_disc_step(self, x: torch.Tensor, tokenizer_out: dict):
+        if not self._use_disc:
+            raise RuntimeError("disc is disabled")
         self.may_freeze(self.vq_loss_fn.discriminator, False)
 
         disc_loss, log_disc = self.forward_discriminator(x, tokenizer_out, train_tokenizer=False, split="train")
 
         # backward
+        assert self.disc_optim is not None, "disc_optim should not be None when use_disc=True"
         self.disc_optim.zero_grad()
         self.accelerator.backward(disc_loss)
         if self.accelerator.sync_gradients:
@@ -1653,6 +1760,7 @@ class CosmosHyperspectralTokenizerTrainer:
             disc = self.vq_loss_fn.discriminator
             assert isinstance(disc, nn.Module), "discriminator must be a torch.nn.Module"
             self._raise_if_nonfinite_params(disc, model_name="discriminator (after optimizer.step)")
+        assert self.disc_sched is not None, "disc_sched should not be None when use_disc=True"
         self.disc_sched.step()
 
         # ema update
@@ -1734,7 +1842,9 @@ class CosmosHyperspectralTokenizerTrainer:
                 self._ssim_fn.update(x_q, recon_q)
 
         _accum_models = [self.tokenizer]
-        _accum_models.append(self.vq_loss_fn.discriminator)
+        if self._use_disc:
+            assert self.vq_loss_fn.discriminator is not None, "discriminator should not be None when use_disc=True"
+            _accum_models.append(self.vq_loss_fn.discriminator)
         if hasattr(self, "proxy_model"):
             _accum_models.append(self.proxy_model)
 
@@ -1776,8 +1886,11 @@ class CosmosHyperspectralTokenizerTrainer:
                         out_d,
                         proxy_aug_future=proxy_aug_future,
                     )
-                    # train discriminator on clean image
-                    disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
+                    if self._use_disc:
+                        # train discriminator on clean image
+                        disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
+                    else:
+                        disc_loss, log_disc_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype), {}
 
                 elif self.aug_pipeline_train_obj == "decoder_deg":
                     tokenizer_loss, log_token_loss, proxy_out = self.train_tokenizer_step(
@@ -1785,8 +1898,11 @@ class CosmosHyperspectralTokenizerTrainer:
                         out_d,
                         proxy_aug_future=proxy_aug_future,
                     )
-                    # train discriminator on degraded image
-                    disc_loss, log_disc_loss = self.train_disc_step(x_deg, out_d)
+                    if self._use_disc:
+                        # train discriminator on degraded image
+                        disc_loss, log_disc_loss = self.train_disc_step(x_deg, out_d)
+                    else:
+                        disc_loss, log_disc_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype), {}
 
                 else:
                     # The case for "anti_deg_network" is handled inside train_tokenizer_step
@@ -1796,7 +1912,10 @@ class CosmosHyperspectralTokenizerTrainer:
                         out_d,
                         proxy_aug_future=proxy_aug_future,
                     )
-                    disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
+                    if self._use_disc:
+                        disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
+                    else:
+                        disc_loss, log_disc_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype), {}
 
             else:  # normal AE training pipeline
                 proxy_aug_future: ProxyAugFuture | None = None
@@ -1816,7 +1935,10 @@ class CosmosHyperspectralTokenizerTrainer:
                 if proxy_out_ is not None:
                     proxy_out = proxy_out_
 
-                disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
+                if self._use_disc:
+                    disc_loss, log_disc_loss = self.train_disc_step(x, out_d)
+                else:
+                    disc_loss, log_disc_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype), {}
                 # Proxy model train step (pretraining task)
                 if self.train_cfg.proxy_task_train_type == "seperated":
                     proxy_out = self.train_proxy_model_step(x, proxy_aug_future=proxy_aug_future)
@@ -1863,7 +1985,8 @@ class CosmosHyperspectralTokenizerTrainer:
                 f"Image latent status: min/max: {latent_status['latent/min'], latent_status['latent/max']}, "
                 f"mean/std: {latent_status['latent/mean'], latent_status['latent/std']}"
             )
-            self.log_msg(f"[Train Disc]: {_log_disc_losses}")
+            if self._use_disc:
+                self.log_msg(f"[Train Disc]: {_log_disc_losses}")
 
             # ------ Proxy task infos --------- #
             if self._has_proxy_task and proxy_out is not None:
@@ -1877,7 +2000,8 @@ class CosmosHyperspectralTokenizerTrainer:
 
             # tensorboard log
             self.tenb_log_any("metric", log_token_loss, self.global_step)
-            self.tenb_log_any("metric", log_disc_loss, self.global_step)
+            if self._use_disc:
+                self.tenb_log_any("metric", log_disc_loss, self.global_step)
             self.tenb_log_any("metric", latent_status, step=self.global_step)
             if self._has_proxy_task and proxy_out is not None:
                 self.tenb_log_any(
@@ -2028,7 +2152,8 @@ class CosmosHyperspectralTokenizerTrainer:
         if hasattr(self.tokenizer_optim, "eval"):
             self.log_msg("set optimizer to eval mode (support for splus optimizer)")
             self.tokenizer_optim.eval()
-            self.disc_optim.eval()
+            if self._use_disc and self.disc_optim is not None:
+                self.disc_optim.eval()
 
         # set all mode
         def _set_all_model_modes(train=False):
@@ -2114,12 +2239,14 @@ class CosmosHyperspectralTokenizerTrainer:
 
         _set_all_model_modes(train=True)
         self.tokenizer_optim.zero_grad()
-        self.disc_optim.zero_grad()
+        if self._use_disc and self.disc_optim is not None:
+            self.disc_optim.zero_grad()
 
         if hasattr(self.tokenizer_optim, "train"):
             self.log_msg("set optimizer to train mode (support for splus optimizer)")
             self.tokenizer_optim.train()
-            self.disc_optim.train()
+            if self._use_disc and self.disc_optim is not None:
+                self.disc_optim.train()
 
     def save_state(self):
         self.accelerator.save_state()
@@ -2159,7 +2286,10 @@ class CosmosHyperspectralTokenizerTrainer:
         assert isinstance(ema_tok_model, nn.Module), "ema_tokenizer.ema_model must be a torch.nn.Module"
         self.accelerator.save_model(ema_tok_model, ema_path / "tokenizer")
 
-        self.accelerator.save_model(self.ema_vq_disc.ema_model, ema_path / "discriminator")
+        if self._use_disc:
+            if self.ema_vq_disc is None:
+                raise RuntimeError("ema_vq_disc is None while use_disc=True.")
+            self.accelerator.save_model(self.ema_vq_disc.ema_model, ema_path / "discriminator")
 
         if self._has_proxy_task:
             # Determine which proxy model to save
@@ -2290,16 +2420,20 @@ class CosmosHyperspectralTokenizerTrainer:
             if hasattr(_tok, "encoder"):
                 _tok.encoder.requires_grad_(False)
 
-        # Load discriminator to online model
-        if (
-            self.train_cfg.finetune_strategy
-            not in [
-                "dcae_refine_decoder_head",
-                "dcae_adapt_latent",
-                "peft",
-            ]
+        should_load_disc = (
+            self.train_cfg.finetune_strategy not in ["dcae_refine_decoder_head", "dcae_adapt_latent", "peft"]
             and not self.train_cfg.only_load_tokenizer
-        ):
+        )
+        disc_ckpt_dir = ema_path / "discriminator"
+        if not self._use_disc and (should_load_disc or disc_ckpt_dir.exists()):
+            raise RuntimeError(
+                "Non-disc strict mode does not allow loading discriminator weights/states from checkpoint."
+            )
+
+        # Load discriminator to online model
+        if should_load_disc:
+            if not self._use_disc:
+                raise RuntimeError("Non-disc strict mode does not allow discriminator load path.")
             logger.info("Loading EMA discriminator ...")
             try:
                 accelerate.utils.load_checkpoint_in_model(
@@ -2336,6 +2470,17 @@ class CosmosHyperspectralTokenizerTrainer:
         )
 
     def resume(self, path: str):
+        if not self._use_disc:
+            path_obj = Path(path)
+            has_disc_state = (
+                (path_obj / "discriminator").exists()
+                or (path_obj / "ema" / "discriminator").exists()
+                or len(list(path_obj.glob("**/optimizer_1*"))) > 0
+            )
+            if has_disc_state:
+                raise RuntimeError(
+                    "Non-disc strict mode does not allow resuming checkpoints containing discriminator state."
+                )
         self.log_msg("[Resume]: resume training")
         self.accelerator.load_state(path, load_kwargs={"weights_only": False})
         self.accelerator.wait_for_everyone()
@@ -2436,7 +2581,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.proxy_aug_manager.shutdown()
 
 
-_key = "unicosmos_lora_f8c16p4"
+_key = "hybrid_cosmos_tokenizer_dual_bsq64_cont32_phi_s_ijepa"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",
@@ -2455,6 +2600,8 @@ _configs_dict = {
     # hybrid ae
     "hybrid_cosmos_f16c32p1": "hybrid_cosmos_tokenizer_f16c32p1",
     "hybrid_cosmos_f16c64p1": "hybrid_cosmos_tokenizer_f16c64p1",
+    "hybrid_cosmos_phi_s_encdec_vit": "hybrid_cosmos_tokenizer_phi_s_encoder_decoder_vit",
+    "hybrid_cosmos_tokenizer_dual_bsq64_cont32_phi_s_ijepa": "hybrid_cosmos_tokenizer_dual_bsq64_cont32_phi_s_ijepa",
     "hybrid_pure_cnn_decoder_f16c64p1": "hybrid_pure_cnn_decoder_f16c64",
     # \sigma-vae decoder
     "unicosmos_gen_f8c16p1": "unicosmos_gen_tokenizer_f8c16p1",

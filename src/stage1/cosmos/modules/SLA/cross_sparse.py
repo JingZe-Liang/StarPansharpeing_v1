@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 
-from .core import _get_feature_map, _linear_attention
-from .kernel_cross import _cross_attention
+from .core import _get_feature_map
+from .sparse_kernel_cross import _cross_attention
+from .linear_attn_kernel import linear_attention
 from .utils import mean_pool
 
 
@@ -91,7 +92,7 @@ class SparseLinearCrossAttention(nn.Module):
 
         qf = self.feature_map_q(q16).contiguous().to(self.dtype)
         kf = self.feature_map_k(k16).contiguous().to(self.dtype)
-        o_l = _linear_attention(qf.float(), kf.float(), v16.float(), eps=self.eps).to(self.dtype)
+        o_l = linear_attention(qf, kf, v16, eps=self.eps)
 
         with torch.amp.autocast("cuda", dtype=self.dtype):
             o_l = self.proj_l(o_l)

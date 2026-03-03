@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+import sys
 from typing import Literal, cast
 
 import timm
@@ -26,40 +27,86 @@ DINO_V3_INTERACTION_INDEXES = {
 }
 
 
+def _resolve_dino_v3_repo_dir(repo_path: str | Path | None) -> Path:
+    if repo_path is not None and str(repo_path).strip() != "":
+        repo_dir = Path(repo_path).expanduser().resolve()
+        if not repo_dir.exists():
+            raise FileNotFoundError(f"DINOv3 repo directory does not exist: {repo_dir}")
+        return repo_dir
+
+    candidate_roots = [
+        Path(__file__).parents[6] / "dinov3",
+        Path(__file__).parents[2] / "dinov3",
+    ]
+    for path in candidate_roots:
+        if path.exists():
+            return path
+
+    raise AssertionError(
+        "DINOv3 repo directory not found. Checked: "
+        f"{', '.join(str(p) for p in candidate_roots)}. "
+        "Please set `dino_repo_path` in teacher config or clone from "
+        "https://github.com/facebookresearch/dinov3."
+    )
+
+
+def _find_dino_weight_by_model(weight_dir: Path, model_name: str) -> Path:
+    search_name = model_name + "_pretrain"
+    for path in weight_dir.rglob("*.pth"):
+        if search_name in path.stem:
+            return path
+    raise FileNotFoundError(f"Can not find weight for model={model_name} under directory: {weight_dir}")
+
+
 def load_repa_dino_v3_model(
     weight_path: str | Path | None = None,
     model_name: str | None = "dinov3_vitl16",
     pretrained_on: Literal["satellite", "web"] = "satellite",
     compile: bool = True,
+    repo_path: str | Path | None = None,
 ) -> torch.nn.Module | torch._dynamo.OptimizedModule:
-    repo_dir = Path(__file__).parents[6] / "dinov3"
-    assert repo_dir.exists(), (
-        f"DINOv3 repo directory {repo_dir} does not exist. Please git clone from https://github.com/facebookresearch/dinov3"
-    )
+    repo_dir = _resolve_dino_v3_repo_dir(repo_path)
 
-    if model_name is None and weight_path is not None:
-        stem = Path(weight_path).stem
+    resolved_weight_path: Path | None = None
+    if weight_path is not None and str(weight_path).strip() != "":
+        weight_path_obj = Path(weight_path).expanduser().resolve()
+        if weight_path_obj.is_dir():
+            if model_name is None:
+                raise ValueError("`model_name` must be provided when `weight_path` is a directory.")
+            resolved_weight_path = _find_dino_weight_by_model(weight_path_obj, model_name)
+        else:
+            resolved_weight_path = weight_path_obj
+
+    if model_name is None and resolved_weight_path is not None:
+        stem = resolved_weight_path.stem
         model_name = "_".join(stem.split("_", 2))
-    elif weight_path is None and model_name is not None:
+    elif resolved_weight_path is None and model_name is not None:
         model_type_dir = {
             "web": "web_image_pretrained_lvd",
             "satellite": "remote_sensing_image_pretrained_SAT_493M",
         }[pretrained_on]
-        weight_dir = repo_dir / "weights" / model_type_dir
-        paths = weight_dir.rglob("*.pth")
-        for path in paths:
-            search_name = model_name + "_pretrain"
-            if search_name in path.stem:
-                weight_path = str(path)
-                break
-        assert weight_path is not None, f"can not find weight {model_name=} at {weight_dir}"
-    elif weight_path is None and model_name is None:
+        weight_dir = (repo_dir / "weights" / model_type_dir).resolve()
+        resolved_weight_path = _find_dino_weight_by_model(weight_dir, model_name)
+    elif resolved_weight_path is None and model_name is None:
         raise ValueError("Either model_name or weight_path must be specified.")
 
-    assert weight_path is not None, f"{weight_path=} does not exists"
-    assert Path(weight_path).exists(), "Dino v3 model weight path does not exists"
+    assert model_name is not None
+    assert resolved_weight_path is not None, "Dino v3 model weight path can not be resolved"
+    assert resolved_weight_path.exists(), f"Dino v3 model weight path does not exist: {resolved_weight_path}"
 
-    dino_model = torch.hub.load(repo_dir, model_name, source="local", weights=weight_path)
+    repo_dir_str = str(repo_dir)
+    added_repo_path = False
+    if repo_dir_str not in sys.path:
+        sys.path.insert(0, repo_dir_str)
+        added_repo_path = True
+    try:
+        dino_model = torch.hub.load(repo_dir, model_name, source="local", weights=str(resolved_weight_path))
+    finally:
+        if added_repo_path:
+            try:
+                sys.path.remove(repo_dir_str)
+            except ValueError:
+                pass
     dino_model = cast(nn.Module, dino_model)
     if compile:
         dino_model = torch.compile(dino_model, mode="reduce-overhead")

@@ -36,7 +36,8 @@ except ImportError:
     SAGE2PP_ENABLED = False
 
 
-from .kernel import _attention
+from .sparse_kernel import _attention
+from .linear_attn_kernel import linear_attention, linear_attention_reference
 from .utils import get_block_map, get_cuda_arch
 
 
@@ -66,20 +67,6 @@ def _get_feature_map(
     if tie_feature_map_qk:
         feature_map_k = feature_map_q
     return feature_map_q, feature_map_k
-
-
-def _linear_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    *,
-    eps: float,
-) -> torch.Tensor:
-    # q: (B, H, Lq, D), k/v: (B, H, Lk, D)
-    kvsum = k.transpose(-1, -2) @ v  # (B, H, D, D)
-    ksum = k.sum(dim=-2, keepdim=True)  # (B, H, 1, D)
-    denom = eps + (q * ksum).sum(dim=-1, keepdim=True)  # (B, H, Lq, 1)
-    return (q @ kvsum) / denom
 
 
 class LinearCrossAttention(nn.Module):
@@ -129,8 +116,7 @@ class LinearCrossAttention(nn.Module):
         q = self.feature_map_q(q).contiguous().to(compute_dtype)
         k = self.feature_map_k(k).contiguous().to(compute_dtype)
 
-        # Accumulate in fp32 for stability.
-        o = _linear_attention(q.float(), k.float(), v.float(), eps=self.eps).to(compute_dtype)
+        o = linear_attention(q, k, v, eps=self.eps)
         return o.to(dtype)
 
 
@@ -138,7 +124,17 @@ class LinearCrossAttention(nn.Module):
 
 
 class SparseLinearAttention(nn.Module):
-    def __init__(self, head_dim, topk, feature_map="softmax", BLKQ=64, BLKK=64, use_bf16=True, tie_feature_map_qk=True):
+    def __init__(
+        self,
+        head_dim,
+        topk,
+        feature_map="softmax",
+        BLKQ=64,
+        BLKK=64,
+        use_bf16=True,
+        tie_feature_map_qk=True,
+        lin_attn_use_ref=False,
+    ):
         R"""
         Args:
             head_dim: dimension of each head.
@@ -148,8 +144,11 @@ class SparseLinearAttention(nn.Module):
             BLKK: block size for key.
             use_bf16: whether to use bfloat16 (default) or float16 for computation. The conversion to bf16/fp16 is done inside the module.
             tie_feature_map_qk: whether to use the same feature map for query and key.
+            lin_attn_use_ref: whether to use reference linear attention.
         """
         super().__init__()
+        self.lin_attn_use_ref = lin_attn_use_ref
+
         self.dtype = torch.bfloat16 if use_bf16 else torch.float16
         self.topk = topk
         self.BLKQ = BLKQ
@@ -210,12 +209,10 @@ class SparseLinearAttention(nn.Module):
         q = self.feature_map_q(q).contiguous().to(self.dtype)  # c_q
         k = self.feature_map_k(k).contiguous().to(self.dtype)  # c_k
 
-        def calc_linear(q, k, v):
-            kvsum = k.transpose(-1, -2) @ v
-            ksum = torch.sum(k, dim=-2, keepdim=True)
-            return (q @ kvsum) / (1e-5 + (q * ksum).sum(dim=-1, keepdim=True))
-
-        o_l = calc_linear(q, k, v)
+        if self.lin_attn_use_ref:
+            o_l = linear_attention_reference(q, k, v, eps=1e-5)
+        else:
+            o_l = linear_attention(q, k, v, eps=1e-5)
 
         with torch.amp.autocast("cuda", dtype=self.dtype):
             o_l = self.proj_l(o_l)
@@ -385,13 +382,7 @@ class SageSparseLinearAttention(nn.Module):
         q = self.feature_map_q(q).contiguous().to(self.dtype)  # c_q
         k = self.feature_map_k(k).contiguous().to(self.dtype)  # c_k
 
-        def calc_linear(q, k, v):
-            kvsum = k.transpose(-1, -2) @ v
-            ksum = torch.sum(k, dim=-2, keepdim=True)
-            return (q @ kvsum) / (1e-5 + (q * ksum).sum(dim=-1, keepdim=True))
-
-        # breakpoint()
-        o_l = calc_linear(q, k, v)
+        o_l = linear_attention(q, k, v, eps=1e-5)
 
         with torch.amp.autocast("cuda", dtype=self.dtype):
             o_l = self.proj_l(o_l)

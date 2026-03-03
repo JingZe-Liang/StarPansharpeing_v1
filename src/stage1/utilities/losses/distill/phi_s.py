@@ -111,6 +111,22 @@ def _layer_key(name: str, layer_idx: int) -> str:
     return f"{name}__L{layer_idx}"
 
 
+def _sanitize_buffer_token(token: str) -> str:
+    sanitized = "".join(ch if ch.isalnum() else "_" for ch in token)
+    return sanitized or "key"
+
+
+def _unique_buffer_name(prefix: str, token: str, used: set[str]) -> str:
+    base = f"{prefix}_{_sanitize_buffer_token(token)}"
+    name = base
+    idx = 1
+    while name in used:
+        name = f"{base}_{idx}"
+        idx += 1
+    used.add(name)
+    return name
+
+
 def _ensure_feat_dim(name: str, feat: torch.Tensor, dim: int) -> None:
     if is_bnc(feat):
         if int(feat.shape[-1]) != dim:
@@ -199,17 +215,27 @@ class PhiSDistillLoss(nn.Module):
 
         # buffers for mean and W_ship per teacher (teacher space)
         self._ready = False
-        self.mean_buf = nn.ParameterDict()  # store as Parameter so moves with .to()
-        self.W_buf = nn.ParameterDict()
-
+        self._mean_buf_names: dict[str, str] = {}
+        self._w_buf_names: dict[str, str] = {}
+        used_buffer_names: set[str] = set()
         for k, dim in self.teacher_dims.items():
-            self.mean_buf[k] = nn.Parameter(torch.zeros(dim), requires_grad=False)
-            self.W_buf[k] = nn.Parameter(torch.eye(dim), requires_grad=False)
+            mean_name = _unique_buffer_name("phi_mean", k, used_buffer_names)
+            w_name = _unique_buffer_name("phi_w_ship", k, used_buffer_names)
+            self.register_buffer(mean_name, torch.zeros(dim), persistent=True)
+            self.register_buffer(w_name, torch.eye(dim), persistent=True)
+            self._mean_buf_names[k] = mean_name
+            self._w_buf_names[k] = w_name
 
         # streaming stats (official-like): sum and sum(x^T x) in teacher space
         self._stat_n: dict[str, int] = {k: 0 for k in self.teacher_dims.keys()}
         self._stat_sum: dict[str, torch.Tensor] = {}
         self._stat_xxt: dict[str, torch.Tensor] = {}
+
+    def _mean_buf(self, key: str) -> torch.Tensor:
+        return self.get_buffer(self._mean_buf_names[key])
+
+    def _w_buf(self, key: str) -> torch.Tensor:
+        return self.get_buffer(self._w_buf_names[key])
 
     @torch.no_grad()
     def reset_phi(self):
@@ -279,8 +305,10 @@ class PhiSDistillLoss(nn.Module):
                 mean=mean64, cov=cov64, hadamard_fn=self.hadamard_fn, eps=self.eps
             )
 
-            self.mean_buf[k].copy_(mean64.to(dtype=self.mean_buf[k].dtype))
-            self.W_buf[k].copy_(W_ship64.to(dtype=self.W_buf[k].dtype))
+            mean_buf = self._mean_buf(k)
+            w_buf = self._w_buf(k)
+            mean_buf.copy_(mean64.to(dtype=mean_buf.dtype))
+            w_buf.copy_(W_ship64.to(dtype=w_buf.dtype))
 
         self._ready = True
 
@@ -291,8 +319,8 @@ class PhiSDistillLoss(nn.Module):
         return {
             "teacher_dims": dict(self.teacher_dims),
             "eps": float(self.eps),
-            "mean": {k: self.mean_buf[k].detach().cpu() for k in self.teacher_dims.keys()},
-            "W_ship": {k: self.W_buf[k].detach().cpu() for k in self.teacher_dims.keys()},
+            "mean": {k: self._mean_buf(k).detach().cpu() for k in self.teacher_dims.keys()},
+            "W_ship": {k: self._w_buf(k).detach().cpu() for k in self.teacher_dims.keys()},
         }
 
     @torch.no_grad()
@@ -310,8 +338,8 @@ class PhiSDistillLoss(nn.Module):
             sd = torch.load(cache_path, map_location="cpu")
 
         for k in self.teacher_dims.keys():
-            mean = self.mean_buf[k].detach().clone()
-            W_ship = self.W_buf[k].detach().clone()
+            mean = self._mean_buf(k).detach().clone()
+            W_ship = self._w_buf(k).detach().clone()
 
             if _dist_rank() == 0:
                 assert sd is not None
@@ -321,8 +349,8 @@ class PhiSDistillLoss(nn.Module):
             dist.broadcast(mean, src=0)
             dist.broadcast(W_ship, src=0)
 
-            self.mean_buf[k].copy_(mean)
-            self.W_buf[k].copy_(W_ship)
+            self._mean_buf(k).copy_(mean)
+            self._w_buf(k).copy_(W_ship)
 
         self._ready = True
 
@@ -369,8 +397,10 @@ class PhiSDistillLoss(nn.Module):
         w_map: dict[str, torch.Tensor] = sd["W_ship"]
 
         for k in self.teacher_dims.keys():
-            self.mean_buf[k].copy_(mean_map[k].to(device=self.mean_buf[k].device, dtype=self.mean_buf[k].dtype))
-            self.W_buf[k].copy_(w_map[k].to(device=self.W_buf[k].device, dtype=self.W_buf[k].dtype))
+            mean_buf = self._mean_buf(k)
+            w_buf = self._w_buf(k)
+            mean_buf.copy_(mean_map[k].to(device=mean_buf.device, dtype=mean_buf.dtype))
+            w_buf.copy_(w_map[k].to(device=w_buf.device, dtype=w_buf.dtype))
 
         self._ready = True
 
@@ -430,8 +460,8 @@ class PhiSDistillLoss(nn.Module):
             wsum += w
 
             # PHI-S transform teacher target into standardized space
-            mean = self.mean_buf[k]
-            W_ship = self.W_buf[k]
+            mean = self._mean_buf(k)
+            W_ship = self._w_buf(k)
             tphi = apply_phi_s(tfeat, mean, W_ship)
 
             sfeat = student_feats[k]
@@ -477,19 +507,30 @@ class MultiLayersPhiSDistillLoss(nn.Module):
         self.layer_weights = layer_weights
 
         self._ready = False
-        self.mean_buf = nn.ParameterDict()
-        self.W_buf = nn.ParameterDict()
-
+        self._mean_buf_names: dict[str, str] = {}
+        self._w_buf_names: dict[str, str] = {}
+        used_buffer_names: set[str] = set()
         for k, dims in self.teacher_dims.items():
             if not dims:
                 raise ValueError(f"{k}: teacher_dims list is empty")
             for i, dim in enumerate(dims):
-                self.mean_buf[_layer_key(k, i)] = nn.Parameter(torch.zeros(dim), requires_grad=False)
-                self.W_buf[_layer_key(k, i)] = nn.Parameter(torch.eye(dim), requires_grad=False)
+                logical_key = _layer_key(k, i)
+                mean_name = _unique_buffer_name("phi_mean", logical_key, used_buffer_names)
+                w_name = _unique_buffer_name("phi_w_ship", logical_key, used_buffer_names)
+                self.register_buffer(mean_name, torch.zeros(dim), persistent=True)
+                self.register_buffer(w_name, torch.eye(dim), persistent=True)
+                self._mean_buf_names[logical_key] = mean_name
+                self._w_buf_names[logical_key] = w_name
 
         self._stat_n: dict[str, list[int]] = {k: [0 for _ in v] for k, v in self.teacher_dims.items()}
         self._stat_sum: dict[str, list[torch.Tensor]] = {}
         self._stat_xxt: dict[str, list[torch.Tensor]] = {}
+
+    def _mean_buf(self, logical_key: str) -> torch.Tensor:
+        return self.get_buffer(self._mean_buf_names[logical_key])
+
+    def _w_buf(self, logical_key: str) -> torch.Tensor:
+        return self.get_buffer(self._w_buf_names[logical_key])
 
     @torch.no_grad()
     def reset_phi(self) -> None:
@@ -573,8 +614,10 @@ class MultiLayersPhiSDistillLoss(nn.Module):
                 )
 
                 mean_key = _layer_key(k, i)
-                self.mean_buf[mean_key].copy_(mean64.to(dtype=self.mean_buf[mean_key].dtype))
-                self.W_buf[mean_key].copy_(W_ship64.to(dtype=self.W_buf[mean_key].dtype))
+                mean_buf = self._mean_buf(mean_key)
+                w_buf = self._w_buf(mean_key)
+                mean_buf.copy_(mean64.to(dtype=mean_buf.dtype))
+                w_buf.copy_(W_ship64.to(dtype=w_buf.dtype))
 
         self._ready = True
 
@@ -586,11 +629,11 @@ class MultiLayersPhiSDistillLoss(nn.Module):
             "teacher_dims": {k: list(v) for k, v in self.teacher_dims.items()},
             "eps": float(self.eps),
             "mean": {
-                k: [self.mean_buf[_layer_key(k, i)].detach().cpu() for i in range(len(v))]
+                k: [self._mean_buf(_layer_key(k, i)).detach().cpu() for i in range(len(v))]
                 for k, v in self.teacher_dims.items()
             },
             "W_ship": {
-                k: [self.W_buf[_layer_key(k, i)].detach().cpu() for i in range(len(v))]
+                k: [self._w_buf(_layer_key(k, i)).detach().cpu() for i in range(len(v))]
                 for k, v in self.teacher_dims.items()
             },
         }
@@ -613,8 +656,8 @@ class MultiLayersPhiSDistillLoss(nn.Module):
             for i in range(len(dims)):
                 mean_key = _layer_key(k, i)
                 w_key = _layer_key(k, i)
-                mean = self.mean_buf[mean_key].detach().clone()
-                W_ship = self.W_buf[w_key].detach().clone()
+                mean = self._mean_buf(mean_key).detach().clone()
+                W_ship = self._w_buf(w_key).detach().clone()
 
                 if _dist_rank() == 0:
                     assert sd is not None
@@ -624,8 +667,8 @@ class MultiLayersPhiSDistillLoss(nn.Module):
                 dist.broadcast(mean, src=0)
                 dist.broadcast(W_ship, src=0)
 
-                self.mean_buf[mean_key].copy_(mean)
-                self.W_buf[w_key].copy_(W_ship)
+                self._mean_buf(mean_key).copy_(mean)
+                self._w_buf(w_key).copy_(W_ship)
 
         self._ready = True
 
@@ -677,10 +720,10 @@ class MultiLayersPhiSDistillLoss(nn.Module):
             for i in range(len(dims)):
                 mean_key = _layer_key(k, i)
                 w_key = _layer_key(k, i)
-                self.mean_buf[mean_key].copy_(
-                    mean_map[k][i].to(device=self.mean_buf[mean_key].device, dtype=self.mean_buf[mean_key].dtype)
-                )
-                self.W_buf[w_key].copy_(w_map[k][i].to(device=self.W_buf[w_key].device, dtype=self.W_buf[w_key].dtype))
+                mean_buf = self._mean_buf(mean_key)
+                w_buf = self._w_buf(w_key)
+                mean_buf.copy_(mean_map[k][i].to(device=mean_buf.device, dtype=mean_buf.dtype))
+                w_buf.copy_(w_map[k][i].to(device=w_buf.device, dtype=w_buf.dtype))
 
         self._ready = True
 
@@ -759,8 +802,8 @@ class MultiLayersPhiSDistillLoss(nn.Module):
                 sfeat = student_feats[k][i]
                 _ensure_feat_dim(f"{k}[{i}]", tfeat, dims[i])
 
-                mean = self.mean_buf[_layer_key(k, i)]
-                W_ship = self.W_buf[_layer_key(k, i)]
+                mean = self._mean_buf(_layer_key(k, i))
+                W_ship = self._w_buf(_layer_key(k, i))
                 tphi = apply_phi_s(tfeat, mean, W_ship)
 
                 if sfeat.shape != tphi.shape:

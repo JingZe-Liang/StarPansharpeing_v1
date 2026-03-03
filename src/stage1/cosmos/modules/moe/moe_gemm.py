@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 gg: Any = None
 try:
     gg = import_module("unsloth.kernels.moe.grouped_gemm.interface")
@@ -96,11 +97,6 @@ class MoEAuxLossAutoScaler(torch.autograd.Function):
 
 
 def router_z_loss(router_logits: torch.Tensor) -> torch.Tensor:
-    """
-    常见 z-loss 形式（一个常用写法）：mean( (logsumexp(logits))^2 )
-    router_logits: (T, E)
-    返回标量
-    """
     z = torch.logsumexp(router_logits, dim=-1)  # (T,)
     return (z**2).mean()
 

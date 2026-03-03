@@ -4,7 +4,7 @@ RMSNorm + SwiGLU + EVA attention with Rope.
 """
 
 from dataclasses import asdict, dataclass
-from typing import Any, List, Optional, Union, cast
+from typing import Any, List, Literal, Optional, Union, cast
 
 import accelerate
 import numpy as np
@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from easydict import EasyDict as edict
 from einops import rearrange
 from loguru import logger
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from timm.layers import create_conv2d, create_norm_act_layer
 from torch import Tensor
 from typing_extensions import Annotated
@@ -38,13 +38,16 @@ from .modules.layers2d import Decoder, Encoder, GenerativeDecoder
 from .modules.naflex import IJEPANaFlexViT, NaFlexVitCfg, Transformer
 from .modules.proj import build_mlp
 
+logger = logger.bind(_name_="CosmosHybrid")
+
 
 class CosmosHybridTokenizer(ContinuousImageTokenizer):
     _no_split_modules = ["EvaBlock", "ResnetBlock", "AttnBlock"]
     _vf_on_z_or_module = "z"  # must be z if using this model
     # latents cached
-    z: Tensor | None = None
-    sem_z: Tensor | None = None
+    z: Tensor | list[Tensor] | None = None
+    # repa/phi-s projections
+    sem_z: Tensor | list[Tensor] | None = None
     supported_cached_hiddens: List[str] = ["z", "sem_z"]
     cache_layers: dict[str, list[int]] = {
         "low_level": [0, 1, 2, -1],  # -1 means middle layer
@@ -52,6 +55,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     }
     low_lvl_repa_proj_chans: list[int] = []
     _semantic_feature_dim: int = 1152
+    sem_repa_proj_is_multi_layer_cached: bool = False
+    sem_repa_proj_is_multi_layer_cached_by_teacher: dict[str, bool] = {}
 
     def __init__(
         self,
@@ -76,14 +81,40 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         self.distillation_cfg = set_defaults(
             distillation_cfg,
             {
+                # single teacher
                 "dino_feature_dim": 1024,
                 "semantic_feature_dim": 1152,
                 "cache_layers": self.cache_layers,
+                # multiple teachers
+                "teacher_proj_dims": {},
+                "phis_student_source": "semantic",
             },
         )
+
+        # single teacher
         self._dino_feature_dim = self.distillation_cfg.dino_feature_dim
         self._semantic_feature_dim = self.distillation_cfg.semantic_feature_dim
         self.cache_layers = self.distillation_cfg.cache_layers
+
+        # multiple teachers
+        self._teacher_proj_dims: dict[str, dict[str, int]] = {
+            str(teacher_name): {
+                "low_level_out_dim": int(dims_cfg.get("low_level_out_dim", self._dino_feature_dim)),
+                "semantic_out_dim": int(dims_cfg.get("semantic_out_dim", self._semantic_feature_dim)),
+            }
+            for teacher_name, dims_cfg in dict(getattr(self.distillation_cfg, "teacher_proj_dims", {})).items()
+        }
+        self._teacher_names: list[str] = list(self._teacher_proj_dims.keys())
+        self._use_multi_teacher_proj = len(self._teacher_names) > 0
+        self._legacy_multi_teacher_warned = False
+        self.phis_student_source: Literal["semantic", "low_level"] = cast(
+            Literal["semantic", "low_level"],
+            getattr(self.distillation_cfg, "phis_student_source", "semantic"),
+        )
+        if self.phis_student_source not in ("semantic", "low_level"):
+            raise ValueError(
+                f"Unknown phis_student_source={self.phis_student_source}, expected one of ('semantic', 'low_level')."
+            )
 
         ###### Deep supervision configs
         self.hybrid_tokenizer_cfg = set_defaults(
@@ -124,7 +155,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             self.lejepa_projector_latent = create_lejepa_projector(self.latent_channels, self.latent_channels)
             logger.info("[LeJEPA loss]: create lejepa loss and projector for the latent")
 
-    def _build_encoder_decoder(  # type: ignore
+    def _build_encoder_decoder(
         self,
         cfg: ContinuousTokenizerConfig,
         model_cfg: EncoderDecoderConfig,
@@ -221,7 +252,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             )
             logger.debug(
                 f"Will skip the latent through the cat conv without semantic decoder, "
-                "maybe better for reconstruction -- Experimenting"
+                "maybe better for reconstruction, <yellow>Experimenting</yellow>"
             )
 
     def _build_deep_supervised_heads(self, cnn_cfg):
@@ -431,7 +462,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         return {"cls_tokens": terms.lejepa_proj, "patch_tokens": terms.lejepa_proj_patch}
 
     def encode_dino_cls(self, x: torch.Tensor) -> Tensor:
-        """返回semantic encoder输出的normed CLS token (B, D)，用于DINO cls token loss。"""
+        """return semantic encoder's normed CLS token (B, D), for DINO cls token loss"""
         z_low_lvl = self.encoder.encoder(x)
 
         if self.latent_bottleneck_type == "before_semantic":
@@ -448,7 +479,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         tokens = self.semantic_enc_transformer.forward_features(h)  # type: ignore[arg-type]
         tokens = cast(torch.Tensor, tokens)
         if getattr(self.semantic_enc_transformer, "num_prefix_tokens", 0) <= 0:
-            raise ValueError("semantic_enc_transformer未启用cls token（请在配置中设置`class_token: true`）。")
+            raise ValueError("semantic_enc_transformer has no cls token, set `class_token: true` in config")
         return tokens[:, 0, :]
 
     def encode_nepa(self, x, **_ignored_kwargs) -> dict:
@@ -578,25 +609,32 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         )
 
         ######## Apply CNN encoder - semantic transformer encoder - quant conv
-        quant_ret = self._apply_quant_conv_quantizer(z_semantic, use_quantizer)
+        quant_branch_out = self._encode_latent_branches(z_semantic, use_quantizer=use_quantizer)
 
         # Do cache here
         self.z = cache_low_lvl  # [b, c, h, w]
         self.sem_z = cache_semantic
         enc_out.update(low_lvl_z=cache_low_lvl, sem_z=cache_semantic, latent_before_quantizer=z_semantic)
+        enc_out.update(
+            latent=quant_branch_out.latent,
+            q_loss=quant_branch_out.q_loss,
+            q_loss_breakdown=quant_branch_out.q_loss_breakdown,
+            latent_is_dual=quant_branch_out.latent_is_dual,
+        )
 
-        ##### Do quant return out
-        if isinstance(quant_ret, tuple):
-            h, q_loss, loss_breakdown = quant_ret
+        if quant_branch_out.latent_is_dual:
             enc_out.update(
-                latent=h,
-                q_loss=q_loss,
-                q_loss_breakdown=loss_breakdown,
+                latent_quant=quant_branch_out.latent_quant,
+                latent_cont=quant_branch_out.latent_cont,
+                quant_keep_mask=quant_branch_out.quant_keep_mask,
+                to_dec=quant_branch_out.latent,
+                to_dec_is_dual_latent=True,
+                to_dec_latent_quant=quant_branch_out.latent_quant,
+                to_dec_latent_cont=quant_branch_out.latent_cont,
+                to_dec_quant_keep_mask=quant_branch_out.quant_keep_mask,
             )
-
-        ##### z augmentions (noise adding or channel dropping).
-        h = self.latent_aug(quant_ret)
-        enc_out.update(latent=h, to_dec=h)
+        else:
+            enc_out.update(to_dec=quant_branch_out.latent, to_dec_is_dual_latent=False)
 
         return enc_out
 
@@ -623,25 +661,36 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         enc_out["latent_before_quantizer"] = z_low_lvl
 
         ######## Apply CNN encoder - quant conv
-        quant_ret = self._apply_quant_conv_quantizer(z_low_lvl, use_quantizer)
-        if isinstance(quant_ret, tuple):
-            h, q_loss, loss_breakdown = quant_ret
-            enc_out.update(q_loss=q_loss, q_loss_breakdown=loss_breakdown)
+        quant_branch_out = self._encode_latent_branches(z_low_lvl, use_quantizer=use_quantizer)
+        enc_out.update(
+            q_loss=quant_branch_out.q_loss,
+            q_loss_breakdown=quant_branch_out.q_loss_breakdown,
+            latent=quant_branch_out.latent,
+            latent_is_dual=quant_branch_out.latent_is_dual,
+        )
+        if quant_branch_out.latent_is_dual:
+            enc_out.update(
+                latent_quant=quant_branch_out.latent_quant,
+                latent_cont=quant_branch_out.latent_cont,
+                quant_keep_mask=quant_branch_out.quant_keep_mask,
+            )
+            h = self._dual_latents_to_z_mixture(
+                latent_quant=quant_branch_out.latent_quant,
+                latent_cont=quant_branch_out.latent_cont,
+                quant_keep_mask=quant_branch_out.quant_keep_mask,
+            )
+            if self.st_skip_sem_decoder:
+                h_skipped = h.clone()
+                enc_out.h_skipped = h_skipped  # z_dim
         else:
-            assert torch.is_tensor(quant_ret)
-            h = quant_ret
-        enc_out["latent"] = h  # CNN's output is latent
-
-        ##### z augmentions (noise adding or channel dropping)
-        h = self.latent_aug(h)
-
-        ##### Do post-quant conv
-        if self.st_skip_sem_decoder:
-            h = self.decoder.quant_conv["post_quant_conv"](h)  # sent to semantic encoder
-            h_skipped = h.clone()
-            enc_out.h_skipped = h_skipped  #  z_dim
-        else:
-            h = self.decoder.quant_conv(h)
+            h = quant_branch_out.latent
+            ##### Do post-quant conv
+            if self.st_skip_sem_decoder:
+                h = self.decoder.quant_conv["post_quant_conv"](h)  # sent to semantic encoder
+                h_skipped = h.clone()
+                enc_out.h_skipped = h_skipped  #  z_dim
+            else:
+                h = self.decoder.quant_conv(h)
 
         ######### Semantic encoder
         # served as decoder actually ...
@@ -671,7 +720,42 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         else:
             raise ValueError(f"Unknown latent bottleneck type: {t}")
 
-    def decode(  # type: ignore
+    def encode_with_distill_features(
+        self,
+        x: Tensor,
+        use_quantizer: bool | None = None,
+        get_intermediate_features: bool = True,
+    ) -> dict[str, Any]:
+        """Encode and return both raw cached features and projected distillation features.
+        Alias for `get_repa_feature` and arg `force_to`=True.
+        """
+        assert self._vf_on_z_or_module == "z", f"Only support z cache, got {self._vf_on_z_or_module=}"
+        assert hasattr(self, "_repa_proj"), "Only repa projection is supported for distillation features."
+
+        enc_out = self.encode(
+            x=x,
+            use_quantizer=use_quantizer,
+            get_intermediate_features=get_intermediate_features,
+        )
+        repa_feats = self.get_repa_feature(force_to=True)
+        assert repa_feats is not None
+        low_lvl_z_proj, sem_z_proj = repa_feats
+        proj_dict = self.get_repa_feature_dict(force_to=True)
+
+        return {
+            "raw": {
+                "low_lvl_z": enc_out.get("low_lvl_z"),
+                "sem_z": enc_out.get("sem_z"),
+            },
+            "proj": {
+                "low_lvl_z_proj": low_lvl_z_proj,
+                "sem_z_proj": sem_z_proj,
+            },
+            "proj_dict": proj_dict,
+            "encode_out": enc_out,
+        }
+
+    def decode(
         self,
         inp: dict,
         inp_shape: Annotated[Union[torch.Size, int, tuple], "bs,c,h,w or bs,c or c"],
@@ -683,20 +767,37 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         """
         out_d = edict(**inp)  # quantization-related, to_dec, latent
         h = inp["to_dec"]
+        to_dec_is_z = bool(inp.get("to_dec_is_z", False))
+
+        if bool(inp.get("to_dec_is_dual_latent", False)):
+            quant_keep_mask = inp.get("to_dec_quant_keep_mask")
+            assert torch.is_tensor(quant_keep_mask), "to_dec_quant_keep_mask should be a tensor"
+            h = self._dual_latents_to_z_mixture(
+                latent_quant=inp.get("to_dec_latent_quant"),
+                latent_cont=inp.get("to_dec_latent_cont"),
+                quant_keep_mask=quant_keep_mask,
+            )
+            to_dec_is_z = True
+            out_d.to_dec = h
 
         # Decoder
         chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
 
         # Apply post-quant conv - semantic transformer decoder - CNN decoder
-        if self.st_skip_sem_decoder:
-            if self.latent_bottleneck_type == "after_semantic":
-                h = self.decoder.quant_conv["post_quant_conv"](h)
-                h_skipped = h.clone()  # z_dim
+        if not to_dec_is_z:
+            if self.st_skip_sem_decoder:
+                if self.latent_bottleneck_type == "after_semantic":
+                    h = self.decoder.quant_conv["post_quant_conv"](h)
+                    h_skipped = h.clone()  # z_dim
+                else:
+                    h_skipped = inp.get("h_skipped")  # z_dim
+                    assert h_skipped is not None
             else:
-                h_skipped = inp.get("h_skipped")  # z_dim
-                assert h_skipped is not None
-        else:
-            h = self.decoder.quant_conv(h)
+                h = self.decoder.quant_conv(h)
+        elif self.st_skip_sem_decoder:
+            h_skipped = inp.get("h_skipped")
+            if h_skipped is None:
+                h_skipped = h.clone()
 
         # Apply semantic transformer decoder if it exists
         if self.semantic_transformer_dec is not None:
@@ -704,6 +805,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         # Cat the skipped latent
         if self.st_skip_sem_decoder:
+            if h_skipped.shape[-2:] != h.shape[-2:]:
+                h_skipped = F.interpolate(h_skipped, size=h.shape[-2:], mode="nearest")
             h = torch.cat([h, h_skipped], dim=1)
             h = self.decoder.quant_conv["st_cat_conv"](h)
 
@@ -775,43 +878,153 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             hybrid_tokenizer_cfg=edict(hybrid_tokenizer_cfg),
         )
 
+    def _should_project_repa_features(self, force_to: bool = False) -> bool:
+        if force_to:
+            return True
+        if not self._use_repa_loss:
+            return False
+        if not self.training:
+            # Skip distillation projections in eval mode by default.
+            return False
+        return True
+
+    @staticmethod
+    def _project_feature_branch(
+        *,
+        proj: nn.Module,
+        cached: Tensor | list[Tensor],
+        is_multi: bool,
+        proj_name: str,
+    ) -> Tensor | list[Tensor]:
+        if is_multi:
+            assert isinstance(proj, nn.ModuleList), f"{proj_name} must be ModuleList when is_multi=True"
+            assert isinstance(cached, list), f"{proj_name} cached feature must be list when is_multi=True"
+            assert len(proj) == len(cached), (
+                f"{proj_name} projection count mismatch: got {len(proj)} projections for {len(cached)} cached features."
+            )
+            return [proj_i(feat_i) for proj_i, feat_i in zip(proj, cached)]
+
+        assert torch.is_tensor(cached), f"{proj_name} cached feature must be Tensor when is_multi=False"
+        return proj(cached)
+
+    def _project_low_level_features(
+        self,
+        low_lvl_proj: nn.Module,
+        cached_low_lvl: Tensor | list[Tensor],
+    ) -> Tensor | list[Tensor]:
+        return self._project_feature_branch(
+            proj=low_lvl_proj,
+            cached=cached_low_lvl,
+            is_multi=self.low_lvl_repa_proj_is_multi,
+            proj_name="low_lvl_repa_proj",
+        )
+
+    def _project_semantic_features(
+        self,
+        sem_proj: nn.Module,
+        cached_sem: Tensor | list[Tensor],
+        *,
+        is_multi_cached: bool,
+    ) -> Tensor | list[Tensor]:
+        return self._project_feature_branch(
+            proj=sem_proj,
+            cached=cached_sem,
+            is_multi=is_multi_cached,
+            proj_name="sem_repa_proj",
+        )
+
+    def _get_single_teacher_repa_feature(
+        self,
+        force_to: bool = False,
+    ) -> tuple[Tensor | list[Tensor], Tensor | list[Tensor]] | None:
+        if not self._should_project_repa_features(force_to):
+            return None
+
+        z, sem_z = self.z, self.sem_z
+        assert self._vf_on_z_or_module == "z"
+        assert z is not None and sem_z is not None, "No cached z or sem_z"
+        assert isinstance(self._repa_proj, nn.ModuleDict)
+
+        low_lvl_z_proj = self._project_low_level_features(self._repa_proj["low_lvl_repa_proj"], z)
+        sem_z_proj = self._project_semantic_features(
+            self._repa_proj["sem_repa_proj"],
+            sem_z,
+            is_multi_cached=self.sem_repa_proj_is_multi_layer_cached,
+        )
+        return low_lvl_z_proj, sem_z_proj
+
+    def _get_multi_teacher_repa_feature(
+        self,
+        force_to: bool = False,
+    ) -> dict[str, tuple[Tensor | list[Tensor], Tensor | list[Tensor]]] | None:
+        if not self._should_project_repa_features(force_to):
+            return None
+        if not self._use_multi_teacher_proj:
+            raise RuntimeError("_get_multi_teacher_repa_feature is only valid in multi-teacher projection mode.")
+
+        z, sem_z = self.z, self.sem_z
+        assert self._vf_on_z_or_module == "z"
+        assert z is not None and sem_z is not None, "No cached z or sem_z"
+        assert isinstance(self._repa_proj, nn.ModuleDict)
+
+        out: dict[str, tuple[Tensor | list[Tensor], Tensor | list[Tensor]]] = {}
+        for teacher_name in self._teacher_names:
+            teacher_proj = self._repa_proj[teacher_name]
+            assert isinstance(teacher_proj, nn.ModuleDict), (
+                f"Expected {teacher_name} projection as ModuleDict, got {type(teacher_proj)}"
+            )
+
+            low_lvl_z_proj = self._project_low_level_features(teacher_proj["low_lvl_repa_proj"], z)
+            sem_z_proj = self._project_semantic_features(
+                teacher_proj["sem_repa_proj"],
+                sem_z,
+                is_multi_cached=self.sem_repa_proj_is_multi_layer_cached_by_teacher.get(
+                    teacher_name, self.sem_repa_proj_is_multi_layer_cached
+                ),
+            )
+            out[teacher_name] = (low_lvl_z_proj, sem_z_proj)
+        return out
+
     @torch.autocast("cuda", dtype=torch.bfloat16)
     def get_repa_feature(
         self,
         force_to: bool = False,
     ) -> tuple[Tensor | list[Tensor], Tensor | list[Tensor]] | None:
-        if not force_to:
-            if not self._use_repa_loss:
+        if not self._use_multi_teacher_proj:
+            return self._get_single_teacher_repa_feature(force_to=force_to)
+
+        multi_feats = self._get_multi_teacher_repa_feature(force_to=force_to)
+        if multi_feats is None:
+            return None
+
+        primary_teacher = self._teacher_names[0]
+        if not self._legacy_multi_teacher_warned:
+            logger.warning(
+                f"[Repa proj]: get_repa_feature() is using primary teacher '{primary_teacher}' in multi-teacher mode. "
+                "Please switch to get_repa_feature_dict() for all teachers."
+            )
+            self._legacy_multi_teacher_warned = True
+        return multi_feats[primary_teacher]
+
+    @torch.autocast("cuda", dtype=torch.bfloat16)
+    def get_repa_feature_dict(self, force_to: bool = False) -> dict[str, Tensor | list[Tensor]] | None:
+        if self.phis_student_source not in ("semantic", "low_level"):
+            raise ValueError(
+                f"Unknown phis_student_source={self.phis_student_source}, expected one of ('semantic', 'low_level')."
+            )
+        branch_index = 1 if self.phis_student_source == "semantic" else 0
+
+        if not self._use_multi_teacher_proj:
+            single_feats = self._get_single_teacher_repa_feature(force_to=force_to)
+            if single_feats is None:
                 return None
-            elif not self.training:
-                # is not training, do not proj since we do not need to train using repa features
-                return None
+            teacher_name = self._teacher_names[0] if len(self._teacher_names) > 0 else "default"
+            return {teacher_name: single_feats[branch_index]}
 
-        # z and sem_z
-        z, sem_z = self.z, self.sem_z
-        assert self._vf_on_z_or_module == "z"
-        assert z is not None and sem_z is not None, "No cached z or sem_z"
-
-        ###### Low-level repa projection
-        if self.low_lvl_repa_proj_is_multi:
-            assert isinstance(z, list)
-            low_lvl_z_proj = [
-                self._repa_proj["low_lvl_repa_proj"][i](z[i]) for i in range(len(self.low_lvl_repa_proj_chans))
-            ]
-        else:
-            assert torch.is_tensor(z)
-            low_lvl_z_proj = self._repa_proj["low_lvl_repa_proj"](z)
-
-        ######## Semantic feature repa projection
-        if self.sem_repa_proj_is_multi:
-            assert isinstance(sem_z, list)
-            sem_z_proj = [self._repa_proj["sem_repa_proj"][i](sem_z[i]) for i in range(len(sem_z))]
-        else:
-            assert torch.is_tensor(sem_z)
-            sem_z_proj = self._repa_proj["sem_repa_proj"](sem_z)
-
-        # return tuple of Tensors or list of Tensors
-        return low_lvl_z_proj, sem_z_proj
+        multi_feats = self._get_multi_teacher_repa_feature(force_to=force_to)
+        if multi_feats is None:
+            return None
+        return {teacher_name: feats[branch_index] for teacher_name, feats in multi_feats.items()}
 
     def _build_feature_align_mlp(self, proj_type: str = "norm_first_force_conv"):
         logger.info(f"[Repa proj]: build mlp type {proj_type}")
@@ -821,59 +1034,84 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         assert self._vf_on_z_or_module == "z", f"Only support z for _vf_on_z_or_modulebut got {self._vf_on_z_or_module}"
 
-        if self._use_repa_loss:
-            # Low-level projection
-            self.low_lvl_repa_proj_is_multi = isinstance(self.cache_layers["low_level"], (tuple, list))
-            if not self.low_lvl_repa_proj_is_multi:
-                low_lvl_z_proj = build_mlp(
-                    self.cnn_cfg.model.z_channels, self._dino_feature_dim, self._dino_feature_dim, proj_type=proj_type
-                )
-            else:
-                assert len(self.low_lvl_repa_proj_chans) == len(self.cache_layers["low_level"]), (
-                    f"Length of low_lvl_repa_proj_chans {len(self.low_lvl_repa_proj_chans)} "
-                    f"should match length of cached low level layers "
-                    f"{len(self.cache_layers['low_level'])}"
-                )
+        if not self._use_repa_loss:
+            return
 
-                low_lvl_z_proj = nn.ModuleList()
-                for i in range(len(self.cache_layers["low_level"])):
-                    proj_ = build_mlp(
+        # Low-level projection
+        self.low_lvl_repa_proj_is_multi = isinstance(self.cache_layers["low_level"], (tuple, list))
+        if self.low_lvl_repa_proj_is_multi:
+            assert len(self.low_lvl_repa_proj_chans) == len(self.cache_layers["low_level"]), (
+                f"Length of low_lvl_repa_proj_chans {len(self.low_lvl_repa_proj_chans)} "
+                f"should match length of cached low level layers "
+                f"{len(self.cache_layers['low_level'])}"
+            )
+
+        sem_cache_layers = self.cache_layers["semantic"]
+        self.sem_repa_proj_is_multi_layer_cached = isinstance(sem_cache_layers, (tuple, list))
+        self.sem_repa_proj_is_multi_layer_cached_by_teacher = {}
+
+        def _build_low_level_proj(out_dim: int) -> nn.Module:
+            if not self.low_lvl_repa_proj_is_multi:
+                return build_mlp(self.cnn_cfg.model.z_channels, out_dim, out_dim, proj_type=proj_type)
+
+            low_lvl_z_proj = nn.ModuleList()
+            for i in range(len(self.cache_layers["low_level"])):
+                low_lvl_z_proj.append(
+                    build_mlp(
                         self.low_lvl_repa_proj_chans[i],
-                        self._dino_feature_dim,
-                        self._dino_feature_dim,
+                        out_dim,
+                        out_dim,
                         proj_type=proj_type,
                     )
-                    low_lvl_z_proj.append(proj_)
+                )
+            return low_lvl_z_proj
 
-            # Semantic projection
-            sem_cache_layers = self.cache_layers["semantic"]
-            is_multi_layer_cached = isinstance(sem_cache_layers, (tuple, list))
-            self.sem_repa_proj_is_multi = is_multi_layer_cached
-            if is_multi_layer_cached:
+        def _build_sem_proj(out_dim: int) -> nn.Module:
+            if self.sem_repa_proj_is_multi_layer_cached:
                 sem_z_proj = nn.ModuleList()
                 for _ in range(len(sem_cache_layers)):
                     sem_z_proj.append(
                         build_mlp(
-                            # since the transformer embedding layer has the same channels
                             self.trans_enc_cfg.embed_dim,
-                            self._semantic_feature_dim,
-                            self._semantic_feature_dim,
+                            out_dim,
+                            out_dim,
                             proj_type=proj_type,
                         )
                     )
-            else:
-                sem_z_proj = build_mlp(
-                    self.trans_enc_cfg.embed_dim,
-                    self._semantic_feature_dim,
-                    self._semantic_feature_dim,
-                    proj_type=proj_type,
-                )
-            self._repa_proj = nn.ModuleDict(
-                {
-                    "low_lvl_repa_proj": low_lvl_z_proj,
-                    "sem_repa_proj": sem_z_proj,
-                }
+                return sem_z_proj
+
+            return build_mlp(
+                self.trans_enc_cfg.embed_dim,
+                out_dim,
+                out_dim,
+                proj_type=proj_type,
             )
+
+        if self._use_multi_teacher_proj:
+            teacher_proj = nn.ModuleDict()
+            for teacher_name in self._teacher_names:
+                dims = self._teacher_proj_dims[teacher_name]
+                teacher_proj[teacher_name] = nn.ModuleDict(
+                    {
+                        "low_lvl_repa_proj": _build_low_level_proj(dims["low_level_out_dim"]),
+                        "sem_repa_proj": _build_sem_proj(dims["semantic_out_dim"]),
+                    }
+                )
+                self.sem_repa_proj_is_multi_layer_cached_by_teacher[teacher_name] = (
+                    self.sem_repa_proj_is_multi_layer_cached
+                )
+            self._repa_proj = teacher_proj
+            logger.info(f"[Repa proj]: built multi-teacher projections for {self._teacher_names}.")
+            return
+
+        low_lvl_z_proj = _build_low_level_proj(self._dino_feature_dim)
+        sem_z_proj = _build_sem_proj(self._semantic_feature_dim)
+        self._repa_proj = nn.ModuleDict(
+            {
+                "low_lvl_repa_proj": low_lvl_z_proj,
+                "sem_repa_proj": sem_z_proj,
+            }
+        )
 
     def _set_grad_zero_for_ddp(self, starts_with: list[str] | None = None):
         """Set the gradients to zero for DDP training.
@@ -1152,6 +1390,51 @@ def hyrbid_lejea_iejepa_f8_config():
     return OmegaConf.create(yml)
 
 
+def hybrid_dual_latent_distill_f8_config():
+    cfg = hybrid_ijepa_f8_config()
+    cfg.cnn_cfg.dual_latent_branch = True
+    cfg.cnn_cfg.continuous_latent_channels = 32
+    cfg.cnn_cfg.model.latent_channels = 64  # is discreate channel
+    cfg.cnn_cfg.quantizer_type = "bsq"
+    return cfg
+
+
+def hybrid_asymmetrical_enc_dec_f16_config() -> DictConfig:
+    """
+    Reuse the base dual-latent config and add an asymmetric CNN decoder config.
+    Encoder keeps x8 compression while decoder is set to x16 upsampling.
+    """
+    cfg = hybrid_dual_latent_distill_f8_config()
+    cfg.trans_enc_cfg.patch_size = 2
+    cfg.trans_enc_cfg.unpatch_size = 1
+    cfg.cnn_dec_cfg = OmegaConf.create(
+        """
+        resolution: 1024
+        in_channels: 512
+        out_channels: 512
+        z_channels: 768
+        latent_channels: 64
+        channels: 128
+        channels_mult: [1, 2, 4, 4]
+        num_res_blocks: 2
+        attn_resolutions: []
+        dropout: 0.0
+        spatial_compression: 16
+        patch_size: 1
+        block_name: res_block
+        norm_type: trmsnorm2d
+        act_type: silu
+        adaptive_mode: interp
+        downsample_kwargs:
+            padconv_use_manually_pad: false
+        upsample_kwargs:
+            interp_type: nearest_interp
+        per_layer_noise: false
+        """
+    )
+    return cfg
+
+
 ###### Tests ##########
 
 
@@ -1220,17 +1503,20 @@ def test_model_forward_backward(
 
     device = torch.device("cuda")
 
-    cfg = hybrid_ijepa_f8_config(
-        # pretrained_path="runs/stage1_cosmos_hybrid/2025-12-09_18-38-25_hybrid_cosmos_f16c64_jepa_pretrained/ema/tokenizer/model.safetensors",
-        pretrained_path="runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors",
-        latent_chans=32,
-        use_repa_loss=True,
-    )
+    # cfg = hybrid_ijepa_f8_config(
+    #     # pretrained_path="runs/stage1_cosmos_hybrid/2025-12-09_18-38-25_hybrid_cosmos_f16c64_jepa_pretrained/ema/tokenizer/model.safetensors",
+    #     pretrained_path="runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors",
+    #     latent_chans=32,
+    #     use_repa_loss=True,
+    # )
     # cfg = hybrid_distillation_f16_config(
     #     pretrained_path="runs/stage1_cosmos_hybrid/2025-11-15_22-11-24_hybrid_cosmos_f16c64/ema/tokenizer/model.safetensors",
     #     use_repa_loss=True,
     # )
     # cfg = hyrbid_lejea_iejepa_f8_config()
+    # cfg = hybrid_dual_latent_distill_f8_config()
+    cfg = hybrid_asymmetrical_enc_dec_f16_config()
+    # breakpoint()
     model: CosmosHybridTokenizer = CosmosHybridTokenizer.create_model(
         cfg.cnn_cfg,
         cfg.trans_enc_cfg,
@@ -1314,6 +1600,12 @@ def test_model_forward_backward(
                     decoded_tensor = model.decode(encoded, x.shape).recon
 
             decoded_tensor.clamp_(-1, 1)
+            if decoded_tensor.shape[-2:] != x.shape[-2:]:
+                raise RuntimeError(
+                    "Decoded tensor spatial size mismatch: "
+                    f"decoded={decoded_tensor.shape[-2:]}, target={x.shape[-2:]}. "
+                    "Please fix decoder upsampling ratio in config."
+                )
 
             # Compute mean and std of the latent
             if compute_mean_std:
@@ -1340,7 +1632,9 @@ def test_model_forward_backward(
                     logger.info(f"save reconstruction image {name_suffix}")
 
                 plot_img(
-                    decoded_tensor, Path(save_img_dir) / f"recon_{real_data or 'fake'}_{index}.png", "reconstruction"
+                    decoded_tensor,
+                    Path(save_img_dir) / f"recon_{real_data or 'fake'}_{index}.png",
+                    "reconstruction",
                 )
                 plot_img(x, Path(save_img_dir) / f"gt_{real_data or 'fake'}_{index}.png", "ground truth")
 
