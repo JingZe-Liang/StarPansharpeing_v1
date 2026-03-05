@@ -85,8 +85,16 @@ def _run_video(
     codec: str,
     quality: int,
     bit_depth: int,
+    gop_size: int,
+    enable_inter_prediction: bool,
 ) -> dict[str, Any]:
-    compressor = HyperspectralVideoCompressor(codec=codec, quality=quality, bit_depth=bit_depth)  # type: ignore[arg-type]
+    compressor = HyperspectralVideoCompressor(
+        codec=codec,  # type: ignore[arg-type]
+        quality=quality,
+        bit_depth=bit_depth,  # type: ignore[arg-type]
+        gop_size=gop_size,
+        enable_inter_prediction=enable_inter_prediction,
+    )
     return compressor.evaluate_file(
         input_file=input_file,
         output_dir=output_dir,
@@ -272,6 +280,8 @@ def run_benchmark(args: argparse.Namespace) -> list[MethodResult]:
                             codec=args.video_codec,
                             quality=args.video_quality,
                             bit_depth=args.video_bit_depth,
+                            gop_size=args.video_gop_size,
+                            enable_inter_prediction=not args.video_all_intra,
                         )
                     elif method == "ccsds_lossless":
                         out = _run_ccsds(
@@ -344,9 +354,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--jp2k-backend", choices=["tiff_jpeg2000", "gdal_jp2"], default="tiff_jpeg2000")
     parser.add_argument("--jp2k-reversible", action="store_true")
 
-    parser.add_argument("--video-codec", choices=["h265", "h266"], default="h265")
+    parser.add_argument("--video-codec", choices=["h265", "h266", "av1"], default="h265")
     parser.add_argument("--video-quality", type=int, default=75)
     parser.add_argument("--video-bit-depth", choices=[8, 10], type=int, default=10)
+    parser.add_argument("--video-gop-size", type=int, default=16, help="Keyframe interval for video codecs.")
+    parser.add_argument("--video-all-intra", action="store_true", help="Disable inter prediction (GOP=1).")
 
     parser.add_argument("--ccsds-abs-error", type=int, default=20, help="Absolute error for ccsds_lossy.")
     parser.add_argument("--keep-ccsds-raw", action="store_true")
@@ -363,4 +375,37 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    """
+    方法	                PSNR	SSIM	            Ratio	    时间 (s)	压缩文件大小 (bytes)
+    ccsds_lossless	        inf	    1.0000	            3.39598	    27.7975	    361,840
+    ccsds_lossy (abs=20)	42.5500	0.9799	            25.86294	31.7634	    47,512
+    jp2k (q=75)	            41.4380	0.9843	            17.92482	0.0963	    68,553
+    video h265 (q=75, gop=16, 10bit)	26.6230	0.6993	149.10812	~0.8	    8,241
+    video h266 (q=75, gop=16, 10bit)	27.2844	0.7020	40.62014	2.1190	    30,251
+
+    ----------- variants ----------
+        方法	     PSNR	 SSIM	 Ratio	 压缩文件大小 (bytes)
+    jp2k_q50	    11.9361	0.0790	55.2916	22,224
+    jp2k_q40	    9.4626	0.0296	56.3050	21,824
+    ccsds_abs100	29.6578	0.7680	67.1329	18,304
+    h265_q50_g16	17.6910	0.4745	163.6218	7,510
+    h265_q30_g16	18.1316	0.4622	163.6436	7,509
+    h266_q50_g16	21.3325	0.4098	68.5906	17,915
+    h266_q30_g16	17.8348	0.5147	68.2439	18,006
+
+    # jpeg2000
+    q   psnr                ssim
+    95 63.05250930786133 0.9998394846916199 188294 6.525964714754586
+    90 62.07342529296875 0.9998058080673218 139021 8.838952388488071
+    85 52.33019256591797 0.9979000091552734 120356 10.20971119013593
+    80 46.460105895996094 0.9938655495643616 92894 13.22798027859711
+    75 41.43803787231445 0.9842767119407654 68553 17.924817294647937
+    70 36.313011169433594 0.9596226811408997 46159 26.621027318616086
+    65 31.24460220336914 0.8812326788902283 32639 37.64821226140507
+    60 26.167524337768555 0.7048376202583313 25549 48.09581588320482
+    55 19.8538818359375 0.3376980125904083 22756 53.998945333098966
+    50 11.936135292053223 0.07901767641305923 22224 55.29157667386609
+    45 9.943246841430664 0.03720010817050934 21904 56.09934258582907
+    40 9.462634086608887 0.029636459425091743 21824 56.3049853372434
+    """
     main()

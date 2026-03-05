@@ -1572,8 +1572,8 @@ def __test_create_hyper_image_litdata_loader():
 
 
 def __test_index_file_litdata_loader():
-    index_file = "data/RS5M/LitData_images_val/val_index.json"
-    input_dir = "data/RS5M/LitData_images_val/"
+    index_file = "data2/SSL4EO-L/etm_sr/etm_sr_litdata/index.json"
+    input_dir = "data2/SSL4EO-L/etm_sr/etm_sr_litdata/"
 
     ds = ImageStreamingDataset.create_dataset(
         input_dir=input_dir,
@@ -1582,8 +1582,16 @@ def __test_index_file_litdata_loader():
         transform_prob=0.0,
         resize_before_transform=256,
         is_cycled=False,
-        index_file_name="val_index",
+        index_file_name="index",
     )
+    print(ds[0])
+    img = ds[0]["img"]
+    img = (img + 1) / 2
+    img_rgb = img[[2, 1, 0]].permute(1, 2, 0) * 255.0
+    import PIL
+
+    img_pil = PIL.Image.fromarray(img_rgb.numpy().astype(np.uint8))
+    img_pil.save("test.png")
 
 
 def __test_normal_image_loader():
@@ -1745,8 +1753,8 @@ if __name__ == "__main__":
 
     # create_hyper_image_litdata_loader()
     # create_hyper_image_litdata_flatten_paths_loader()
-    # test_index_file_litdata_loader()
-    __test_normal_image_loader()
+    # __test_index_file_litdata_loader()
+    # __test_normal_image_loader()
     # __test_gen_loader()
     # __test_ds_len()
     # __test_get_item_key()

@@ -254,3 +254,9 @@
 [submodule "src/stage2/compression/ccsds123_verification"]
 	path = src/stage2/compression/ccsds123_verification
 	url = https://github.com/NTNU-SmallSat-Lab/ccsds123_issue_2_verification_model.git
+[submodule "src/utilities/optim/flashoptim"]
+	path = src/utilities/optim/flashoptim
+	url = https://github.com/databricks/flashoptim.git
+[submodule "src/utilities/transport/self_flow"]
+	path = src/utilities/transport/self_flow
+	url = https://github.com/black-forest-labs/Self-Flow.git

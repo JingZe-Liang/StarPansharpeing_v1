@@ -7,7 +7,7 @@ from transformers.data.processors.utils import SingleSentenceClassificationProce
 import warnings
 from collections import namedtuple
 from types import SimpleNamespace
-from typing import Dict, Literal, NamedTuple, Optional, Union
+from typing import Any, Callable, Dict, Literal, NamedTuple, Optional, Union
 
 import torch
 import torch.distributed.tensor as dtensor
@@ -21,6 +21,7 @@ from loguru import logger
 from src.utilities.config_utils import function_config_to_basic_types
 from src.utilities.train_utils.time import time_recorder
 from src.stage1.self_supervised.lejepa_aug import SIGReg
+from src.stage1.self_supervised.generative_prior_loss.diffusion_loss import DiffusionLoss
 
 from ..model import (
     DinoDiscV2,
@@ -338,6 +339,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # phis loss
         phis_loss_weight: float | None = None,
         phis_loss_options: dict = {},
+        # diffusion prior loss
+        diffusion_loss_weight: float | None = None,
+        diffusion_loss_options: dict = {},
         # other losses
         lecam_loss_weight: float | None = None,
         lcr_loss_weight: float | None = None,
@@ -477,6 +481,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.perceptual_weight = perceptual_weight
         self.phis_loss_weight = phis_loss_weight
         self.use_phis = phis_loss_weight is not None and phis_loss_weight > 0
+        self.diffusion_loss_weight = diffusion_loss_weight
+        self.use_diffusion = diffusion_loss_weight is not None and diffusion_loss_weight > 0
 
         # * repa loss
         self.repa_loss_weight = repa_loss_weight
@@ -537,6 +543,11 @@ class VQLPIPSWithDiscriminator(nn.Module):
             self.phis_loss = PhiSMultipleTeacherDistillLoss(**phis_loss_options).to(self.device)
             self.phis_loss.move_teachers_to(self.device, dtype=self.dtype)  # ty: ignore[invalid-argument-type]
             logger.info(f"[vq loss]: phis loss used, weighted {self.phis_loss_weight}")
+
+        # * diffusion prior loss
+        if self.use_diffusion:
+            self.diffusion_loss = DiffusionLoss(model=None, **diffusion_loss_options).to(self.device)
+            logger.info(f"[vq loss]: diffusion prior loss used, weighted {self.diffusion_loss_weight}")
 
         # * LeCAM ema loss
         self.gen_loss_weight = gen_loss_weight
@@ -952,6 +963,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         real_g_loss: torch.Tensor | None = None,
         repa_loss: torch.Tensor | None = None,
         phis_loss: torch.Tensor | None = None,
+        diffusion_loss: torch.Tensor | None = None,
         sem_dist_loss: torch.Tensor | None = None,
         vf_loss: torch.Tensor | None = None,
         lcr_loss: torch.Tensor | None = None,
@@ -985,6 +997,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 # Feature distillation loss
                 "repa_loss": _detach_if_not_None(repa_loss),
                 "phis_loss": _detach_if_not_None(phis_loss),
+                "diffusion_loss": _detach_if_not_None(diffusion_loss),
                 "sem_dist_loss": _detach_if_not_None(sem_dist_loss),
                 "vf_loss": _detach_if_not_None(vf_loss),
                 # Latent regularization loss
@@ -1013,6 +1026,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "ssim_loss": _detach_if_not_None(ssim_loss),
                     "repa_loss": _detach_if_not_None(repa_loss),
                     "phis_loss": _detach_if_not_None(phis_loss),
+                    "diffusion_loss": _detach_if_not_None(diffusion_loss),
                     "sem_dist_loss": _detach_if_not_None(sem_dist_loss),
                     "vf_loss": _detach_if_not_None(vf_loss),
                     "lcr_loss": _detach_if_not_None(lcr_loss),
@@ -1034,6 +1048,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     "perceptual_loss": _detach_if_not_None(percep_loss),
                     "gram_loss": _detach_if_not_None(gram_loss),
                     "phis_loss": _detach_if_not_None(phis_loss),
+                    "diffusion_loss": _detach_if_not_None(diffusion_loss),
                     "g_loss": real_g_loss.detach(),
                 }
 
@@ -1103,6 +1118,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # for semantic distillation
         tokenizer_feat2: torch.Tensor | list[torch.Tensor] | None = None,
         phis_student_feature: dict[str, torch.Tensor | list[torch.Tensor]] | None = None,
+        diffusion_model: nn.Module | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+        diffusion_model_kwargs: dict[str, Any] | None = None,
         enc_last_layer: nn.Parameter | None = None,
     ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor | float]]:
         # generator update
@@ -1167,6 +1184,20 @@ class VQLPIPSWithDiscriminator(nn.Module):
             with torch.autocast(self.device.type, dtype=self.dtype):
                 phis_loss_val = self.phis_loss(inputs, phis_student_feature)
             phis_loss_val = phis_loss_val * self.phis_loss_weight
+
+        # * diffusion prior loss
+        diffusion_loss_val = self.zero
+        if self.use_diffusion:
+            assert self.diffusion_loss_weight is not None
+            assert latent is not None, "latent is required when diffusion prior loss is enabled"
+            assert diffusion_model is not None, "diffusion_model is required when diffusion prior loss is enabled"
+            with torch.autocast(self.device.type, dtype=self.dtype):
+                diffusion_loss_val = self.diffusion_loss(
+                    latent,
+                    model_kwargs=diffusion_model_kwargs,
+                    model=diffusion_model,
+                )
+            diffusion_loss_val = diffusion_loss_val * self.diffusion_loss_weight
 
         # * lcr loss
         lcr_loss_val = self.zero
@@ -1241,6 +1272,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             + g_loss
             + repa_loss
             + phis_loss_val
+            + diffusion_loss_val
             + vf_loss
             + sem_dist_loss
             + lcr_loss_val
@@ -1259,6 +1291,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             gen_loss=g_loss,
             repa_loss=repa_loss,
             phis_loss=phis_loss_val,
+            diffusion_loss=diffusion_loss_val,
             sem_dist_loss=sem_dist_loss,
             vf_loss=vf_loss,
             lcr_loss=lcr_loss_val,
@@ -1390,6 +1423,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # tokenizer distillation feature (low-level and semantic)
         tokenizer_feat2: torch.Tensor | list[torch.Tensor] | None = None,
         phis_student_feature: dict[str, torch.Tensor | list[torch.Tensor]] | None = None,
+        diffusion_model: nn.Module | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+        diffusion_model_kwargs: dict[str, Any] | None = None,
         split: str = "train",  # TODO: remove this
         add_prefix: bool = False,
     ):
@@ -1457,6 +1492,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 tokenizer_feat=tokenizer_feat,
                 tokenizer_feat2=tokenizer_feat2,
                 phis_student_feature=phis_student_feature,
+                diffusion_model=diffusion_model,
+                diffusion_model_kwargs=diffusion_model_kwargs,
                 enc_last_layer=enc_last_layer,
             )
 

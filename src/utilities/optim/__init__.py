@@ -34,6 +34,7 @@ from .muon import Muon
 from .muon_fsdp import Muon as MounFSDP_v1
 from .muon_fsdp_v2 import Muon as MounFSDP_v2
 from .muon_fused import MuonFSDP
+from .muon_quantized_fused import QuantizedMuonFSDP
 from .magma_skipupdate_wrapper import (
     MagmaMaskConfig,
     MagmaSkipUpdateWrapper,
@@ -63,6 +64,7 @@ torch.serialization.add_safe_globals(
         Muon,
         MuonTriton,
         MuonFSDP,
+        QuantizedMuonFSDP,
         MagmaMaskConfig,
         MagmaSkipUpdateWrapper,
         MuonBallFused,
@@ -152,7 +154,7 @@ def _disable_heavyball_optim_compilation():
     try:
         import heavyball
 
-        heavyball.utils.compile_mode = None
+        heavyball.utils.compile_mode = None  # type: ignore[invalid-assignment]
     except ImportError:
         pass
 

@@ -69,24 +69,29 @@ def load_weights_with_shape_check(
                 unexpected_keys.remove(weight_name)
 
     elif load_strategy == "search":
-        params = list(module.named_parameters())
+        matched_keys: set[str] = set()
+        params = module.named_parameters()
         tbar = tqdm(params, desc="Loading model checkpoint ...")
         for name, param in tbar:
-            tbar.set_description(f"Meteralizing param={name}")
-            if name in unexpected_keys:  # search in the whole weight keys, O(n) complexity
-                unexpected_keys.remove(name)  # This key was expected, and remove from the total key set
-                if param.shape == weights[name].shape:
-                    param.data.copy_(weights[name].data)
-                else:
-                    logger.warning(
-                        f"Shape mismatch for {name}: expected {param.shape}, got {weights[name].shape} - skipping",
-                        tqdm=True,
-                    )
-                    # Consider this a missing key since we didn't load it
-                    missing_keys.append(name)
-            else:
+            weight = weights.get(name)
+            if weight is None:
                 missing_keys.append(name)
                 logger.warning(f"{name} not found in weights", tqdm=True)
+                continue
+
+            matched_keys.add(name)
+            if param.shape == weight.shape:
+                param.data.copy_(weight.data)
+            else:
+                logger.warning(
+                    f"Shape mismatch for {name}: expected {param.shape}, got {weight.shape} - skipping",
+                    tqdm=True,
+                )
+                # Consider this a missing key since we didn't load it
+                missing_keys.append(name)
+
+        # Keep checkpoint key order while excluding matched keys.
+        unexpected_keys = [key for key in weights if key not in matched_keys]
 
     else:
         raise ValueError(f"Invalid load strategy: {load_strategy}")
@@ -371,9 +376,7 @@ def load_peft_model_checkpoint(
     peft_model = PeftModel.from_pretrained(base_model, peft_pretrained_path, adapter_name="default")
 
     if merge_and_unload:
-        peft_model = peft_model.merge_and_unload(  # type: ignore
-            progressbar=True, adapter_names=["default"]
-        )
+        peft_model = peft_model.merge_and_unload(progressbar=True, adapter_names=["default"])
 
     return peft_config, peft_model
 

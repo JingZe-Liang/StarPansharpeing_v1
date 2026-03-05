@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import math
+from functools import lru_cache
 
 import torch
 import torch.nn as nn
@@ -8,6 +10,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 import einops
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+from loguru import logger
 
 from ..variants.mlp import SwiGLU
 from .patch_merge.patch_merge_triton import patch_merge_blc
@@ -21,6 +24,33 @@ from .attn.func_flash_swin_hybrid import hybrid_sdpa_fwd_flash_swin_v3_bwd
 from .attn.func_flash_swin_v2 import flash_swin_attn_func_v2
 from .attn.func_flash_swin_v3 import flash_swin_attn_func_v3
 from .attn.func_swin import mha_core, window_partition, window_reverse
+
+logger = logger.bind(_name_="swin")
+
+
+@lru_cache(maxsize=128)
+def _cached_shift_attn_mask(height: int, width: int, window_size: int, shift_size: int) -> torch.Tensor:
+    img_mask = torch.zeros((1, height, width, 1))
+    h_slices = (
+        slice(0, -window_size),
+        slice(-window_size, -shift_size),
+        slice(-shift_size, None),
+    )
+    w_slices = (
+        slice(0, -window_size),
+        slice(-window_size, -shift_size),
+        slice(-shift_size, None),
+    )
+    cnt = 0
+    for h in h_slices:
+        for w in w_slices:
+            img_mask[:, h, w, :] = cnt
+            cnt += 1
+
+    mask_windows = window_partition(img_mask, window_size)
+    mask_windows = mask_windows.view(-1, window_size * window_size)
+    attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+    return attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
 
 
 def _build_mlp(
@@ -145,6 +175,8 @@ class WindowAttention(nn.Module):
             window_mask = window_mask.to(device=q.device, dtype=q.dtype)
 
         if self.attn_backend == "py":
+            if mask is not None:
+                mask = mask.to(device=q.device, dtype=q.dtype)
             attn = mha_core(q, k, v, relative_position_bias, mask, self.scale)
         elif self.attn_backend == "sdpa":
             attn_bias = relative_position_bias.unsqueeze(0).to(device=q.device, dtype=q.dtype)
@@ -260,7 +292,7 @@ class SwinTransformerBlock(nn.Module):
         super().__init__()
         self.dim = dim
         self.out_dim = dim if out_dim is None else out_dim
-        self.input_resolution = input_resolution
+        self.input_resolution = self._normalize_input_resolution(input_resolution)
         self.num_heads = num_heads
         self.window_size = window_size
         self.shift_size = shift_size
@@ -272,7 +304,7 @@ class SwinTransformerBlock(nn.Module):
             raise ValueError(f"Unsupported window backend: {self.window_backend}")
         if self.window_backend == "triton":
             set_window_process_backend("triton")
-        if min(self.input_resolution) <= self.window_size:
+        if self.input_resolution is not None and min(self.input_resolution) <= self.window_size:
             # if window size is larger than input resolution, we don't partition windows
             self.shift_size = 0
             self.window_size = min(self.input_resolution)
@@ -304,39 +336,58 @@ class SwinTransformerBlock(nn.Module):
         )
         self.ffn_residual_proj = nn.Identity() if self.out_dim == dim else nn.Linear(dim, self.out_dim)
 
-        if self.shift_size > 0:
+        attn_mask = None
+        if self.shift_size > 0 and self.input_resolution is not None:
             # calculate attention mask for SW-MSA
-            H, W = self.input_resolution
-            img_mask = torch.zeros((1, H, W, 1))  # 1 H W 1
-            h_slices = (
-                slice(0, -self.window_size),
-                slice(-self.window_size, -self.shift_size),
-                slice(-self.shift_size, None),
-            )
-            w_slices = (
-                slice(0, -self.window_size),
-                slice(-self.window_size, -self.shift_size),
-                slice(-self.shift_size, None),
-            )
-            cnt = 0
-            for h in h_slices:
-                for w in w_slices:
-                    img_mask[:, h, w, :] = cnt
-                    cnt += 1
+            attn_mask = self._prepare_shift_attn_mask(self.input_resolution)
 
-            mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
-            mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
-            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-            attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
-        else:
-            attn_mask = None
+        self.register_buffer("attn_mask", attn_mask, persistent=False)
 
-        self.register_buffer("attn_mask", attn_mask)
+    @staticmethod
+    def _normalize_input_resolution(
+        input_resolution: tuple[int, int] | list[int] | int | None,
+    ) -> tuple[int, int] | None:
+        if input_resolution is None:
+            return None
+        if isinstance(input_resolution, int):
+            return (input_resolution, input_resolution)
+        if isinstance(input_resolution, (tuple, list)) and len(input_resolution) == 2:
+            return (int(input_resolution[0]), int(input_resolution[1]))
+        raise ValueError(f"Invalid input_resolution: {input_resolution}")
+
+    def _prepare_shift_attn_mask(self, input_resolution: tuple[int, int]):
+        assert isinstance(input_resolution, (tuple, list)), "Input resolution must be provided"
+        H, W = input_resolution
+        return _cached_shift_attn_mask(H, W, self.window_size, self.shift_size)
+
+    def _infer_hw_from_x(self, x):
+        L = x.shape[1]
+        # assume x is a square image
+        H, W = int(math.sqrt(L)), int(math.sqrt(L))
+        return H, W
+
+    def _resolve_runtime_shift_size(self, height: int, width: int) -> int:
+        if self.shift_size <= 0:
+            return 0
+        if self.shift_size >= height or self.shift_size >= width:
+            return 0
+        return self.shift_size
 
     def forward(self, x):
-        H, W = self.input_resolution
+        is_nchw_input = x.ndim == 4
+        if is_nchw_input:
+            B, C, H_2d, W_2d = x.shape
+            x = x.permute(0, 2, 3, 1).reshape(B, H_2d * W_2d, C).contiguous()
+            H, W = H_2d, W_2d
+        elif x.ndim == 3:
+            H, W = self.input_resolution if self.input_resolution is not None else self._infer_hw_from_x(x)
+        else:
+            raise ValueError(f"SwinTransformerBlock expects 3D or 4D input, got ndim={x.ndim}")
+
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
+        assert C == self.dim, f"input channel mismatch, expected {self.dim}, got {C}"
+        runtime_shift_size = self._resolve_runtime_shift_size(H, W)
 
         shortcut = x
         x = self.norm1(x)
@@ -350,12 +401,12 @@ class SwinTransformerBlock(nn.Module):
                 H,
                 W,
                 C,
-                -self.shift_size,
+                -runtime_shift_size,
                 self.window_size,
             )
         else:
-            if self.shift_size > 0:
-                shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
+            if runtime_shift_size > 0:
+                shifted_x = torch.roll(x, shifts=(-runtime_shift_size, -runtime_shift_size), dims=(1, 2))
                 x_windows = window_partition(shifted_x, self.window_size)
             else:
                 shifted_x = x
@@ -364,7 +415,13 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
+        if runtime_shift_size > 0 and self.input_resolution == (H, W) and self.attn_mask is not None:
+            attn_mask = self.attn_mask
+        elif runtime_shift_size > 0:
+            attn_mask = self._prepare_shift_attn_mask((H, W))
+        else:
+            attn_mask = None
+        attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -376,13 +433,13 @@ class SwinTransformerBlock(nn.Module):
                 H,
                 W,
                 C,
-                self.shift_size,
+                runtime_shift_size,
                 self.window_size,
             )
         else:
-            if self.shift_size > 0:
+            if runtime_shift_size > 0:
                 shifted_x = window_reverse(attn_windows, self.window_size, H, W)
-                x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
+                x = torch.roll(shifted_x, shifts=(runtime_shift_size, runtime_shift_size), dims=(1, 2))
             else:
                 shifted_x = window_reverse(attn_windows, self.window_size, H, W)
                 x = shifted_x
@@ -391,7 +448,7 @@ class SwinTransformerBlock(nn.Module):
 
         # FFN
         x = self.ffn_residual_proj(x) + self.drop_path(self.mlp(self.norm2(x)))
-        if self.output_2d:
+        if is_nchw_input or self.output_2d:
             x = x.view(B, H, W, self.out_dim).permute(0, 3, 1, 2).contiguous()
 
         return x
@@ -404,6 +461,8 @@ class SwinTransformerBlock(nn.Module):
         )
 
     def flops(self):
+        if self.input_resolution is None:
+            raise ValueError("input_resolution is required to compute flops")
         flops = 0
         H, W = self.input_resolution
         # norm1
@@ -506,12 +565,15 @@ class BasicLayer(nn.Module):
         norm_layer=nn.LayerNorm,
         downsample=None,
         use_checkpoint=False,
+        **_kwargs,
     ):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
         self.depth = depth
         self.use_checkpoint = use_checkpoint
+        if len(_kwargs) != 0:
+            logger.debug(f"Got unexpected kwargs: {_kwargs}")
 
         # build blocks
         self.blocks = nn.ModuleList(

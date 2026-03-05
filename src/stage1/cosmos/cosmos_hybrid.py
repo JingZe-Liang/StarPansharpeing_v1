@@ -679,6 +679,9 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 latent_cont=quant_branch_out.latent_cont,
                 quant_keep_mask=quant_branch_out.quant_keep_mask,
             )
+            # In dual-branch mode, use mixed latent as the public latent for downstream losses/logging.
+            enc_out["latent"] = h
+            enc_out["latent_mixed"] = h
             if self.st_skip_sem_decoder:
                 h_skipped = h.clone()
                 enc_out.h_skipped = h_skipped  # z_dim
@@ -779,6 +782,9 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             )
             to_dec_is_z = True
             out_d.to_dec = h
+            # Keep `latent` aligned with the mixed decoder input in dual-branch mode.
+            out_d.latent = h
+            out_d.latent_mixed = h
 
         # Decoder
         chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
@@ -1503,19 +1509,19 @@ def test_model_forward_backward(
 
     device = torch.device("cuda")
 
-    # cfg = hybrid_ijepa_f8_config(
-    #     # pretrained_path="runs/stage1_cosmos_hybrid/2025-12-09_18-38-25_hybrid_cosmos_f16c64_jepa_pretrained/ema/tokenizer/model.safetensors",
-    #     pretrained_path="runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors",
-    #     latent_chans=32,
-    #     use_repa_loss=True,
-    # )
+    cfg = hybrid_ijepa_f8_config(
+        # pretrained_path="runs/stage1_cosmos_hybrid/2025-12-09_18-38-25_hybrid_cosmos_f16c64_jepa_pretrained/ema/tokenizer/model.safetensors",
+        pretrained_path="runs/stage1_cosmos_hybrid/2025-12-21_23-52-12_hybrid_cosmos_f16c64_ijepa_pretrained_sem_no_lejepa/ema/tokenizer/model.safetensors",
+        latent_chans=32,
+        use_repa_loss=True,
+    )
     # cfg = hybrid_distillation_f16_config(
     #     pretrained_path="runs/stage1_cosmos_hybrid/2025-11-15_22-11-24_hybrid_cosmos_f16c64/ema/tokenizer/model.safetensors",
     #     use_repa_loss=True,
     # )
     # cfg = hyrbid_lejea_iejepa_f8_config()
     # cfg = hybrid_dual_latent_distill_f8_config()
-    cfg = hybrid_asymmetrical_enc_dec_f16_config()
+    # cfg = hybrid_asymmetrical_enc_dec_f16_config()
     # breakpoint()
     model: CosmosHybridTokenizer = CosmosHybridTokenizer.create_model(
         cfg.cnn_cfg,

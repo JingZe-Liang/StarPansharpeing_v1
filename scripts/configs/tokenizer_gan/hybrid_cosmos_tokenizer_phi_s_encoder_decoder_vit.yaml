@@ -134,6 +134,10 @@ vq_loss:
   disc_start_for_d: 0
   disc_loss: relative
 
+  # diffusion prior (off by default)
+  diffusion_loss_weight:
+  diffusion_loss_options: {}
+
   # quantizer loss
   quantizer_type:
   quantizer_options:
@@ -216,6 +220,12 @@ train:
     num_cycles: 1
     reduced_factor: 2
     min_lr: 1.0e-5
+
+  # diffusion denoiser branch (only used when vq_loss.diffusion_loss_weight > 0)
+  diffusion:
+    model:
+    optimizer:
+    scheduler:
 
   log:
     run_comment: phi_s_encdec_vit_ijepa_${dataset.used}

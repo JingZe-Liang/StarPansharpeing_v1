@@ -75,6 +75,14 @@ def is_list_tuple(x: Any) -> bool:
     return isinstance(x, (list, tuple))
 
 
+def _maybe_call_init_weights(module: nn.Module) -> None:
+    has_init, _ = may_dynamo_module_hasattr(module, "init_weights")
+    if has_init:
+        module.init_weights()  # type: ignore[call-arg]
+    elif hasattr(module, "wrap_mod") and isinstance(module.wrap_mod, nn.Module):
+        _maybe_call_init_weights(module.wrap_mod)
+
+
 @deprecated(
     "this class does not work with FSDP, please specify the FSDP wrapped module directly"
     "and the accelerator will handle the wrapping automatically"
@@ -97,6 +105,7 @@ def make_block_fn(
         "dico_block",
         "convnext",
         "res_moe",
+        "swin_block",
     ] = "res_block",
     moe_n_experts=4,
     act_checkpoint=False,
@@ -182,27 +191,43 @@ def make_block_fn(
         from .swin_op import SwinTransformerBlock
         from .variants.mlp import SwiGLU
 
+        swin_attn_backend = kwargs.get("swin_attn_backend", kwargs.get("attn_backend", "triton_v3"))
+        swin_window_backend = kwargs.get("swin_window_backend", kwargs.get("window_backend", "triton"))
+        if not torch.cuda.is_available():
+            if isinstance(swin_attn_backend, str) and (
+                swin_attn_backend.startswith("triton") or swin_attn_backend == "hybrid_v3"
+            ):
+                logger.warning(
+                    f"[Swin block]: CUDA is unavailable, fallback attn backend from {swin_attn_backend} to py."
+                )
+                swin_attn_backend = "py"
+            if swin_window_backend == "triton":
+                logger.warning("[Swin block]: CUDA is unavailable, fallback window backend from triton to py.")
+                swin_window_backend = "py"
+
         def block_fn(block_in, block_out, dropout, curr_res):
             assert curr_res is not None
 
             return SwinTransformerBlock(
                 dim=block_in,
                 out_dim=block_out,
-                input_resolution=curr_res,
-                num_heads=kwargs.get("num_heads", 8),
-                window_size=kwargs.get("window_size", 7),
-                shift_size=kwargs.get("shift_size", 0),
-                mlp_ratio=kwargs.get("mlp_ratio", 4),
-                qkv_bias=kwargs.get("qkv_bias", True),
-                qk_scale=kwargs.get("qk_scale", None),
-                attn_backend=kwargs.get("attn_backend", "triton_v3"),
-                window_backend=kwargs.get("window_backend", "triton"),
+                input_resolution=(curr_res, curr_res),
+                num_heads=kwargs.get("swin_num_heads", kwargs.get("num_heads", 8)),
+                window_size=kwargs.get("swin_window_size", kwargs.get("window_size", 7)),
+                shift_size=kwargs.get("swin_shift_size", kwargs.get("shift_size", 0)),
+                mlp_ratio=kwargs.get("swin_mlp_ratio", kwargs.get("mlp_ratio", 4)),
+                qkv_bias=kwargs.get("swin_qkv_bias", kwargs.get("qkv_bias", True)),
+                qk_scale=kwargs.get("swin_qk_scale", kwargs.get("qk_scale", None)),
+                attn_backend=swin_attn_backend,
+                window_backend=swin_window_backend,
                 mlp_cls=SwiGLU,
             )
 
     else:
         raise ValueError(
-            f"block_name {block_name} is not supported. Supported: 'res_block', 'res_moe', 'dico_block', 'convnext'"
+            "block_name "
+            f"{block_name} is not supported. Supported: 'res_block', 'res_moe', 'dico_block', 'convnext', "
+            "'swin_block'"
         )
 
     return block_fn
@@ -234,7 +259,18 @@ class Encoder(nn.Module):
         patch_size: int = 4,
         patch_method: str = "haar",
         conv_in_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
-        block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
+        block_name: Literal["res_block", "dico_block", "res_moe", "swin_block"] = "res_block",
+        swin_replace_levels: list[int] | None = None,
+        swin_replace_mid: bool = False,
+        swin_num_heads: int = 8,
+        swin_window_size: int = 7,
+        swin_shift_size: int = 0,
+        swin_mlp_ratio: float = 4.0,
+        swin_qkv_bias: bool = True,
+        swin_qk_scale: float | None = None,
+        swin_attn_backend: str = "triton_v3",
+        swin_window_backend: str = "triton",
+        swin_disable_extra_attn: bool = True,
         attn_type: str = "attn_vanilla",
         act_type: str | tuple[str, str] = "silu",
         # if block_name != 'moe', does not use
@@ -262,6 +298,9 @@ class Encoder(nn.Module):
         self.hidden_factor = hidden_factor
         self.moe_type = moe_type
         self.block_name = block_name
+        self.swin_replace_levels = set() if swin_replace_levels is None else set(swin_replace_levels)
+        self.swin_replace_mid = swin_replace_mid
+        self.swin_disable_extra_attn = swin_disable_extra_attn
 
         logger.info(
             f"[Encoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm groups: {norm_groups}, act_type: {act_type}, "
@@ -309,7 +348,7 @@ class Encoder(nn.Module):
         in_ch_mult = (1,) + tuple(channels_mult)
         self.in_ch_mult = in_ch_mult
 
-        block_fn = make_block_fn(
+        block_kwargs: dict[str, Any] = dict(
             block_name=block_name,
             moe_n_experts=self.moe_n_experts,
             moe_n_selected=self.moe_n_selected,
@@ -323,19 +362,33 @@ class Encoder(nn.Module):
             norm_type=norm_type,
             num_groups=norm_groups,
             token_mixer_type=moe_token_mixer_type,
+            swin_num_heads=swin_num_heads,
+            swin_window_size=swin_window_size,
+            swin_shift_size=swin_shift_size,
+            swin_mlp_ratio=swin_mlp_ratio,
+            swin_qkv_bias=swin_qkv_bias,
+            swin_qk_scale=swin_qk_scale,
+            swin_attn_backend=swin_attn_backend,
+            swin_window_backend=swin_window_backend,
         )
+        block_fn = make_block_fn(**block_kwargs)  # ty: ignore error[invalid-argument-type]
+        swin_block_fn = make_block_fn(**{**block_kwargs, "block_name": "swin_block"})  # ty: ignore error[invalid-argument-type]
+
         self.down = nn.ModuleList()
         for i_level in range(self.num_resolutions):
             block = nn.ModuleList()
             attn = nn.ModuleList()
             block_in = channels * in_ch_mult[i_level]
             block_out = channels * channels_mult[i_level]
+            level_use_swin = block_name == "swin_block" or i_level in self.swin_replace_levels
+            level_block_fn = swin_block_fn if level_use_swin else block_fn
             for _ in range(self.num_res_blocks):
-                res_block = block_fn(block_in, block_out, dropout, curr_res)
+                res_block = level_block_fn(block_in, block_out, dropout, curr_res)
                 # res_block = compile_decorator(res_block)  # may compile the block
                 block.append(res_block)
                 block_in = block_out
-                if curr_res in attn_resolutions:
+                should_skip_attn = level_use_swin and self.swin_disable_extra_attn
+                if curr_res in attn_resolutions and not should_skip_attn:
                     logger.info(f"[Encoder]: use attn at {curr_res}")
                     attn_block = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
                     # attn_block = compile_decorator(attn_block)
@@ -359,9 +412,14 @@ class Encoder(nn.Module):
 
         # middle
         self.mid = nn.Module()
-        self.mid.block_1 = block_fn(block_in, block_out, dropout, curr_res)
-        self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
-        self.mid.block_2 = block_fn(block_in, block_out, dropout, curr_res)
+        mid_use_swin = block_name == "swin_block" or self.swin_replace_mid
+        mid_block_fn = swin_block_fn if mid_use_swin else block_fn
+        self.mid.block_1 = mid_block_fn(block_in, block_out, dropout, curr_res)
+        if mid_use_swin and self.swin_disable_extra_attn:
+            self.mid.attn_1 = nn.Identity()
+        else:
+            self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
+        self.mid.block_2 = mid_block_fn(block_in, block_out, dropout, curr_res)
 
         # end
         self.norm_out = Normalize(block_in, norm_type=norm_type, num_groups=norm_groups)
@@ -419,25 +477,23 @@ class Encoder(nn.Module):
 
     @safe_init_weights
     def init_weights(self):
-        self.conv_in.init_weights()
+        _maybe_call_init_weights(self.conv_in)
         for layer in self.down:
             res_block = layer.block
             for rb in res_block:
-                rb.init_weights()
+                _maybe_call_init_weights(rb)
 
             attn_block = layer.attn
             for ab in attn_block:
-                ab.init_weights()
+                _maybe_call_init_weights(ab)
 
             downsample_block = getattr(layer, "downsample", None)
             if downsample_block is not None:
                 downsample_block.apply(block_basic_init)
 
-        self.mid.block_1.init_weights()
-        attn_can_init, _ = may_dynamo_module_hasattr(self.mid.attn_1, "init_weights")
-        if attn_can_init:
-            self.mid.attn_1.init_weights()
-        self.mid.block_2.init_weights()
+        _maybe_call_init_weights(self.mid.block_1)
+        _maybe_call_init_weights(self.mid.attn_1)
+        _maybe_call_init_weights(self.mid.block_2)
 
         block_basic_init(self.norm_out)
         block_basic_init(self.conv_out)
@@ -464,7 +520,18 @@ class Decoder(nn.Module):
         upsample_kwargs: dict = {"interp_type": "xy_repeat"},
         conv_out_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         attn_type: str = "attn_vanilla",
-        block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
+        block_name: Literal["res_block", "dico_block", "res_moe", "swin_block"] = "res_block",
+        swin_replace_levels: list[int] | None = None,
+        swin_replace_mid: bool = False,
+        swin_num_heads: int = 8,
+        swin_window_size: int = 7,
+        swin_shift_size: int = 0,
+        swin_mlp_ratio: float = 4.0,
+        swin_qkv_bias: bool = True,
+        swin_qk_scale: float | None = None,
+        swin_attn_backend: str = "triton_v3",
+        swin_window_backend: str = "triton",
+        swin_disable_extra_attn: bool = True,
         act_type: str | tuple[str, str] = "silu",
         moe_n_experts: int = 4,
         moe_n_selected: int = 1,
@@ -491,6 +558,9 @@ class Decoder(nn.Module):
         self.hidden_factor = hidden_factor
         self.moe_type = moe_type
         self.block_name = block_name
+        self.swin_replace_levels = set() if swin_replace_levels is None else set(swin_replace_levels)
+        self.swin_replace_mid = swin_replace_mid
+        self.swin_disable_extra_attn = swin_disable_extra_attn
 
         logger.info(
             f"[Decoder]: padding mode: {padding_mode}, norm type: {norm_type}, norm_groups: {norm_groups}, act_type: {act_type}, "
@@ -522,7 +592,7 @@ class Decoder(nn.Module):
         )
 
         # block fn
-        block_fn = make_block_fn(
+        block_kwargs: dict[str, Any] = dict(
             block_name=block_name,
             moe_n_experts=self.moe_n_experts,
             moe_n_selected=self.moe_n_selected,
@@ -536,13 +606,28 @@ class Decoder(nn.Module):
             norm_type=norm_type,
             num_groups=norm_groups,
             token_mixer_type=moe_token_mixer_type,
+            swin_num_heads=swin_num_heads,
+            swin_window_size=swin_window_size,
+            swin_shift_size=swin_shift_size,
+            swin_mlp_ratio=swin_mlp_ratio,
+            swin_qkv_bias=swin_qkv_bias,
+            swin_qk_scale=swin_qk_scale,
+            swin_attn_backend=swin_attn_backend,
+            swin_window_backend=swin_window_backend,
         )
+        block_fn = make_block_fn(**block_kwargs)  # ty: ignore error[invalid-argument-type]
+        swin_block_fn = make_block_fn(**{**block_kwargs, "block_name": "swin_block"})  # ty: ignore error[invalid-argument-type]
 
         # middle
         self.mid = nn.Module()
-        self.mid.block_1 = block_fn(block_in, block_in, dropout, curr_res)
-        self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
-        self.mid.block_2 = block_fn(block_in, block_in, dropout, curr_res)
+        mid_use_swin = block_name == "swin_block" or self.swin_replace_mid
+        mid_block_fn = swin_block_fn if mid_use_swin else block_fn
+        self.mid.block_1 = mid_block_fn(block_in, block_in, dropout, curr_res)
+        if mid_use_swin and self.swin_disable_extra_attn:
+            self.mid.attn_1 = nn.Identity()
+        else:
+            self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
+        self.mid.block_2 = mid_block_fn(block_in, block_in, dropout, curr_res)
 
         # upsampling
         self.up = nn.ModuleList()
@@ -550,12 +635,15 @@ class Decoder(nn.Module):
             block = nn.ModuleList()
             attn = nn.ModuleList()
             block_out = channels * channels_mult[i_level]
+            level_use_swin = block_name == "swin_block" or i_level in self.swin_replace_levels
+            level_block_fn = swin_block_fn if level_use_swin else block_fn
             for _ in range(self.num_res_blocks + 1):
-                res_block = block_fn(block_in, block_out, dropout, curr_res)
+                res_block = level_block_fn(block_in, block_out, dropout, curr_res)
                 # res_block = compile_decorator(res_block)
                 block.append(res_block)
                 block_in = block_out
-                if curr_res in attn_resolutions:
+                should_skip_attn = level_use_swin and self.swin_disable_extra_attn
+                if curr_res in attn_resolutions and not should_skip_attn:
                     logger.info(f"[Decoder]: use attn at {curr_res}")
                     attn_block = make_attn(block_in, attn_type=attn_type, act_checkpoint=act_checkpoint)
                     # attn_block = compile_decorator(attn_block)
@@ -661,25 +749,23 @@ class Decoder(nn.Module):
 
     @safe_init_weights
     def init_weights(self):
-        self.conv_out.init_weights()
+        _maybe_call_init_weights(self.conv_out)
         for layer in self.up:
             res_block = layer.block
             for rb in res_block:
-                rb.init_weights()
+                _maybe_call_init_weights(rb)
 
             attn_block = layer.attn
             for ab in attn_block:
-                ab.init_weights()
+                _maybe_call_init_weights(ab)
 
             upsample_block = getattr(layer, "upsample", None)
             if upsample_block is not None:
                 upsample_block.apply(block_basic_init)
 
-        self.mid.block_1.init_weights()
-        attn_can_init, _ = may_dynamo_module_hasattr(self.mid.attn_1, "init_weights")
-        if attn_can_init:
-            self.mid.attn_1.init_weights()
-        self.mid.block_2.init_weights()
+        _maybe_call_init_weights(self.mid.block_1)
+        _maybe_call_init_weights(self.mid.attn_1)
+        _maybe_call_init_weights(self.mid.block_2)
 
         block_basic_init(self.norm_out)
         block_basic_init(self.conv_in)
@@ -713,7 +799,7 @@ class GenerativeDecoder(Decoder):
         upsample_kwargs: dict = {"interp_type": "xy_repeat"},
         conv_out_module: Literal["conv", "resnet", "inv_bottleneck", "moe"] = "conv",
         attn_type: str = "attn_vanilla",
-        block_name: Literal["res_block", "dico_block", "res_moe"] = "res_block",
+        block_name: Literal["res_block", "dico_block", "res_moe", "swin_block"] = "res_block",
         moe_n_experts: int = 4,
         moe_n_selected: int = 1,
         moe_n_shared_experts: int = 1,

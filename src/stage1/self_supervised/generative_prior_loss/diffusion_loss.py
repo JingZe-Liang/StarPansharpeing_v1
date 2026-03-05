@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Callable
+from typing import Any, Callable, Literal
 
 import torch
 import torch.nn as nn
@@ -11,7 +11,7 @@ from src.utilities.transport.flow_matching.transport import Transport
 class DiffusionLoss(nn.Module):
     def __init__(
         self,
-        model: nn.Module | Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        model: nn.Module | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
         *,
         model_type: str = "velocity",
         path_type: str = "linear",
@@ -53,13 +53,18 @@ class DiffusionLoss(nn.Module):
         latent: torch.Tensor,
         model_kwargs: dict[str, Any] | None = None,
         *,
+        model: nn.Module | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
         reduction: Literal["mean", "sum", "none"] = "mean",
         t_forced: torch.Tensor | None = None,
         x0_forced: torch.Tensor | None = None,
         return_terms: bool = False,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
+        run_model = model if model is not None else self.model
+        if run_model is None:
+            raise ValueError("DiffusionLoss requires a model. Pass `model=` in forward or set it in __init__.")
+
         terms = self.transport.training_losses(
-            model=self.model,
+            model=run_model,
             x1=latent,
             model_kwargs=model_kwargs,
             get_pred_x_clean=self.get_pred_x_clean,

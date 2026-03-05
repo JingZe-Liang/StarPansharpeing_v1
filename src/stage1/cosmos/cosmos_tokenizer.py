@@ -149,13 +149,26 @@ class EncoderDecoderConfig:
     patch_method: str = "haar"
     conv_in_module: str = "conv"
     block_name: str = "res_block"
+
+    # swin
+    swin_replace_levels: list[int] = field(default_factory=list)
+    swin_replace_mid: bool = False
+    swin_num_heads: int = 8
+    swin_window_size: int = 7
+    swin_shift_size: int = 0
+    swin_mlp_ratio: float = 4.0
+    swin_qkv_bias: bool = True
+    swin_qk_scale: float | None = None
+    swin_attn_backend: str = "triton_v3"
+    swin_window_backend: str = "triton"
+    swin_disable_extra_attn: bool = True
     attn_type: str = "none"  # 'attn_vanilla' or 'none'
 
     # if block_name != 'moe', does not use
+    hidden_factor: int = 2
     moe_n_experts: int = 4
     moe_n_selected: int = 1
     moe_n_shared_experts: int = 1
-    hidden_factor: int = 2
     moe_type: str = "tc"
     moe_token_mixer_type: str = "res_block"
 
@@ -322,19 +335,12 @@ class ContinuousImageTokenizer(nn.Module):
         self.in_channels_after_patcher = (np.array(model_cfg.in_channels * model_cfg.patch_size**2)).tolist()
         self.out_channels_after_patcher = (np.array(model_cfg.out_channels * model_cfg.patch_size**2)).tolist()
 
-        # NOTE: encoder and decoder maybe separated, e.g., NVIDIA pretrained tokenizer, or
-        # trained on hyperspectral images before
-        # if the uni_tokenizer_path is not empty, then the encoder and decoder are loaded directly.
         enc_path = cfg.enc_path
         dec_path = cfg.dec_path
         uni_tokenizer_path = cfg.uni_path
 
         self.register_buffer("dummy_param", torch.tensor(0), persistent=False)
 
-        # 4. Encoder and Decoder
-        # pretrained encoder and decoder
-
-        # TODO: move this to a separate function
         if cfg.loading_type == "nvidia":
             assert enc_path is not None and dec_path is not None
             assert enc_path.endswith(".jit") and dec_path.endswith(".jit")
@@ -760,12 +766,14 @@ class ContinuousImageTokenizer(nn.Module):
             block_name = self.encoder.encoder.block_name
             if block_name == "res_block":
                 return self.get_submodule(self._hook_module).conv2.weight
-            elif block_name == "res_moe":
+            elif block_name in ("res_moe", "swin_block"):
                 # return self.get_submodule(self._hook_module).moe.moe['moe_tc'].shared_experts.down_proj.weight
                 # return self.get_submodule(self._hook_module).token_mixer.conv2.weight
                 return None
             else:
-                raise ValueError(f"block_name {block_name} not supported, only res_block and res_moe are supported")
+                raise ValueError(
+                    f"block_name {block_name} not supported, only res_block, res_moe and swin_block are supported"
+                )
 
     ########### latent structure shaping #########
 
@@ -1181,6 +1189,9 @@ class ContinuousImageTokenizer(nn.Module):
             )
             dec = self.decoder.decoder(z_dec, chan)
             dec_out["decoder_z"] = z_dec
+            # Keep `latent` aligned with the tensor actually consumed by decoder/loss in dual-branch mode.
+            dec_out["latent"] = z_dec
+            dec_out["latent_mixed"] = z_dec
         else:
             # h = self._maybe_channels_last_4d(dec_out["latent"])
             dec = self.decoder(dec_out["latent"], chan)  # [b, c, h, w]
@@ -1557,7 +1568,7 @@ def vae_f8_config(
             "resolution": 1024,
             "patch_method": "haar",
             "act_checkpoint": True,
-            "block_name": "res_block",  # res_block, res_moe
+            "block_name": "res_block",  # res_block, res_moe, swin_block
             "padding_mode": "reflect",
             # "norm_type": "rmsnorm2d",
             "norm_type": "gn",

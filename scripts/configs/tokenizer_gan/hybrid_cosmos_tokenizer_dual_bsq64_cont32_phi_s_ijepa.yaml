@@ -1,13 +1,12 @@
 defaults:
   # tokenizer ==========
-  - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
+  - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral]
   - tokenizer: cosmos_hybrid_one_big_transformer_dual_bsq64_cont32
   - quantizer: quant
   - proxy_task: ijepa
   - accelerator: base
   - vq_loss: remote_clip_RN50
   # self ============
-  - hydra: base
   - _self_
 
   # hydra overrides ====
@@ -16,7 +15,7 @@ defaults:
 
 hydra:
   run:
-    dir: runs/stage1_cosmos_hybrid_dual_latent/${now:%Y-%m-%d}/${now:%H-%M-%S}_${train.log.run_comment}
+    dir: runs/stage1_cosmos_hybrid_dual_latent/${now:%Y-%m-%d_%H-%M-%S}_${train.log.run_comment}
   output_subdir: hydra_config
 
 accelerator:
@@ -128,18 +127,23 @@ vq_loss:
   lcr_loss_weight:
 
 ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
   beta: 0.999
   update_after_step: 0
   update_every: 2
+  use_foreach: true
+  allow_different_devices: true
 
 train:
   tokenizer_name: hybrid_cosmos_dual_bsq64_cont32_distill_ijepa
   proj_dir: null
   finetune_strategy: finetune_all
   max_grad_norm: 0.08
-  track_metrics: false
+  grad_checkpoint: true
+  track_metrics: true
   track_metrics_duration: -1
-  track_metrics_after: 2000
+  track_metrics_after: 1000
   visualize_every: 200
   max_steps: 1_000_000
   save_every: 1000
@@ -204,6 +208,7 @@ train:
 
   log:
     run_comment: dual_bsq64_cont32_distill_ijepa_${dataset.used}
+    log_with: ['tensorboard']
     log_with_time: True
     visualize_every: 500
     log_every: 10

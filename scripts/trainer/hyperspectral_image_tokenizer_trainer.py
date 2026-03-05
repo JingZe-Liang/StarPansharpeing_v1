@@ -185,7 +185,10 @@ class CosmosHyperspectralTokenizerTrainer:
         # GAN, perceptual losses
         self.vq_loss_fn: VQLPIPSWithDiscriminator = hydra.utils.instantiate(cfg.vq_loss).to(self.device)
         self._use_disc = bool(self.vq_loss_fn.use_disc)
+        self._use_diffusion = bool(getattr(self.vq_loss_fn, "use_diffusion", False))
         self.log_msg(f"[Trainer]: discriminator enabled={self._use_disc}")
+        self.log_msg(f"[Trainer]: diffusion enabled={self._use_diffusion}")
+        self._setup_diffusion_model()
 
         # Visual pretraining proxy task models, e.g, contrastive learning teacher model;
         # JEPA predictor model ...
@@ -199,7 +202,14 @@ class CosmosHyperspectralTokenizerTrainer:
         self.setup_aug_pipe_and_anti_degradation_network()
 
         # Optimizers and lr schedulers
-        self.tokenizer_optim, self.tokenizer_sched, self.disc_optim, self.disc_sched = self.get_optimizer_lr_scheduler()
+        (
+            self.tokenizer_optim,
+            self.tokenizer_sched,
+            self.disc_optim,
+            self.disc_sched,
+            self.diffusion_optim,
+            self.diffusion_sched,
+        ) = self.get_optimizer_lr_scheduler()
 
         # The last layer weight must require grad
         self._ensure_last_layer_requires_grad()
@@ -216,6 +226,10 @@ class CosmosHyperspectralTokenizerTrainer:
                 assert self.vq_loss_fn.discriminator is not None, "discriminator should not be None when use_disc=True"
                 self.vq_loss_fn.discriminator = torch.compile(self.vq_loss_fn.discriminator)
                 self.log_msg(f"Compiled discriminator {self.vq_loss_fn.discriminator.__class__.__name__}")
+            if getattr(self, "_use_diffusion", False):
+                assert self.diffusion_model is not None, "diffusion_model should not be None when use_diffusion=True"
+                self.diffusion_model = torch.compile(self.diffusion_model)
+                self.log_msg(f"Compiled diffusion model {self.diffusion_model.__class__.__name__}")
 
             # no donated buffers
             if self.cfg.vq_loss.gen_loss_weight is None:
@@ -246,6 +260,20 @@ class CosmosHyperspectralTokenizerTrainer:
             return encode_fn(x)
 
         raise AttributeError("tokenizer has not function `encode_dino_cls`.")
+
+    def _setup_diffusion_model(self) -> None:
+        self.diffusion_model = None
+        if not getattr(self, "_use_diffusion", False):
+            return
+
+        diffusion_cfg = getattr(self.train_cfg, "diffusion", None)
+        if diffusion_cfg is None or not hasattr(diffusion_cfg, "model") or diffusion_cfg.model is None:
+            raise ValueError("Diffusion loss is enabled, but `train.diffusion.model` is missing in config.")
+
+        self.diffusion_model = hydra.utils.instantiate(diffusion_cfg.model)
+        assert isinstance(self.diffusion_model, nn.Module), "train.diffusion.model must instantiate to nn.Module"
+        self.diffusion_model = self.diffusion_model.to(self.device)
+        self.log_msg(f"[Diffusion]: initialized denoiser model {self.diffusion_model.__class__.__name__}")
 
     def _init_time_recorder(self) -> None:
         self._time_recorder_enabled = (
@@ -831,6 +859,16 @@ class CosmosHyperspectralTokenizerTrainer:
         else:
             return self.vq_loss_fn.discriminator.state_dict()
 
+    def _get_diffusion_params(self, for_optimizer: bool = False, with_name: bool = False):
+        if not getattr(self, "_use_diffusion", False):
+            raise RuntimeError("diffusion is disabled, can not query diffusion params")
+        assert self.diffusion_model is not None, "diffusion_model should not be None when use_diffusion=True"
+        if not for_optimizer:
+            if with_name:
+                return dict(self.diffusion_model.named_parameters())
+            return list(self.diffusion_model.parameters())
+        return self.diffusion_model.state_dict()
+
     def get_optimizer_lr_scheduler(self):
         # heavyball optimizers may trigger torch.compile (which deepcopies the model) during initialization.
         # If the model is not deepcopy-safe, this will crash before training starts.
@@ -881,9 +919,26 @@ class CosmosHyperspectralTokenizerTrainer:
                 )
             else:
                 disc_optim = None
+            if getattr(self, "_use_diffusion", False):
+                assert hasattr(self.train_cfg, "diffusion"), "train.diffusion is required when diffusion is enabled"
+                assert self.train_cfg.diffusion.optimizer is not None, (
+                    "train.diffusion.optimizer is required when diffusion is enabled"
+                )
+                diffusion_optim = _optimizer_creater(
+                    self.train_cfg.diffusion.optimizer,
+                    self._get_diffusion_params,
+                    getattr(self.train_cfg, "diffusion_no_wd_params", None),
+                )
+            else:
+                diffusion_optim = None
         else:
             tokenizer_optim = DummyOptim([{"params": self._get_tokenizer_params()}])
             disc_optim = DummyOptim([{"params": self._get_disc_params()}]) if self._use_disc else None
+            diffusion_optim = (
+                DummyOptim([{"params": self._get_diffusion_params()}])
+                if getattr(self, "_use_diffusion", False)
+                else None
+            )
 
         # schedulers
         if (
@@ -894,17 +949,30 @@ class CosmosHyperspectralTokenizerTrainer:
             disc_sched = (
                 hydra.utils.instantiate(self.train_cfg.disc_sched)(optimizer=disc_optim) if self._use_disc else None
             )
+            if getattr(self, "_use_diffusion", False):
+                assert self.train_cfg.diffusion.scheduler is not None, (
+                    "train.diffusion.scheduler is required when diffusion is enabled"
+                )
+            diffusion_sched = (
+                hydra.utils.instantiate(self.train_cfg.diffusion.scheduler)(optimizer=diffusion_optim)
+                if getattr(self, "_use_diffusion", False)
+                else None
+            )
         else:
             tokenizer_sched = DummyScheduler(tokenizer_optim)
             disc_sched = DummyScheduler(disc_optim) if self._use_disc else None
+            diffusion_sched = DummyScheduler(diffusion_optim) if getattr(self, "_use_diffusion", False) else None
 
         # set the heavyball optimizer without torch compiling
         is_heavyball_opt = lambda opt: opt.__class__.__module__.startswith("heavyball")
         disc_is_heavyball = is_heavyball_opt(disc_optim) if disc_optim is not None else False
-        if (is_heavyball_opt(tokenizer_optim) or disc_is_heavyball) and disable_heavyball_compile:
+        diffusion_is_heavyball = is_heavyball_opt(diffusion_optim) if diffusion_optim is not None else False
+        if (
+            is_heavyball_opt(tokenizer_optim) or disc_is_heavyball or diffusion_is_heavyball
+        ) and disable_heavyball_compile:
             self.log_msg("Use heavyball optimizer, disable the optimization", level="WARNING")
 
-        return tokenizer_optim, tokenizer_sched, disc_optim, disc_sched
+        return tokenizer_optim, tokenizer_sched, disc_optim, disc_sched, diffusion_optim, diffusion_sched
 
     def set_fsdp_cpu_local_tensor_to_each_rank(self, model: nn.Module | FSDPModule):
         fsdp_plugin = self.accelerator.state.fsdp_plugin
@@ -970,6 +1038,14 @@ class CosmosHyperspectralTokenizerTrainer:
             #     self.vq_loss_fn.discriminator
             # )
 
+        # diffusion denoiser
+        if getattr(self, "_use_diffusion", False):
+            assert self.diffusion_model is not None, "diffusion_model should not be None when use_diffusion=True"
+            assert self.diffusion_optim is not None, "diffusion_optim should not be None when use_diffusion=True"
+            self.diffusion_model, self.diffusion_optim = self.accelerator.prepare(
+                self.diffusion_model, self.diffusion_optim
+            )
+
         # augmentation network
         if self.use_training_aug and self.antideg_net is not None:
             self.antideg_net.dtype = self.dtype
@@ -983,11 +1059,26 @@ class CosmosHyperspectralTokenizerTrainer:
         # )
 
         # Schedulers
+        schedulers: list = [self.tokenizer_sched]
         if self._use_disc:
             assert self.disc_sched is not None, "disc_sched should not be None when use_disc=True"
-            (self.tokenizer_sched, self.disc_sched) = self.accelerator.prepare(self.tokenizer_sched, self.disc_sched)
-        else:
-            self.tokenizer_sched = self.accelerator.prepare(self.tokenizer_sched)
+            schedulers.append(self.disc_sched)
+        if getattr(self, "_use_diffusion", False):
+            assert self.diffusion_sched is not None, "diffusion_sched should not be None when use_diffusion=True"
+            schedulers.append(self.diffusion_sched)
+
+        prepared_scheds = self.accelerator.prepare(*schedulers)
+        if not isinstance(prepared_scheds, tuple):
+            prepared_scheds = (prepared_scheds,)
+
+        sched_idx = 0
+        self.tokenizer_sched = prepared_scheds[sched_idx]
+        sched_idx += 1
+        if self._use_disc:
+            self.disc_sched = prepared_scheds[sched_idx]
+            sched_idx += 1
+        if getattr(self, "_use_diffusion", False):
+            self.diffusion_sched = prepared_scheds[sched_idx]
 
         # Proxy model
         if self.proxy_model is not None:
@@ -1124,9 +1215,10 @@ class CosmosHyperspectralTokenizerTrainer:
                             h_tgt = repeat_interleave_batch(z, B, repeat=len(masks_enc))
 
                     # Context
-                    with self._record_time("forward_tokenizer_ijepa_pred"):
+                    with self._record_time("forward_tokenizer_ijepa"):
                         h_ctx = self.tokenizer.encode_ijepa(x_ijepa, jepa_masks=masks_enc)  # type: ignore
                         h_ctx = _maybe_to_1d(h_ctx)
+                    with self._record_time("forward_ijepa_predictor"):
                         h_pred = self.proxy_model(h_ctx, masks_enc, masks_pred)
 
                     # Loss
@@ -1507,6 +1599,8 @@ class CosmosHyperspectralTokenizerTrainer:
                     tokenizer_feat=repa_low_lvl_feat,
                     tokenizer_feat2=semantic_feat,
                     phis_student_feature=out_d.get("phis_student_feature", None),
+                    diffusion_model=self.diffusion_model if getattr(self, "_use_diffusion", False) else None,
+                    diffusion_model_kwargs=None,
                     last_layer=self.get_last_layer(mode="dec"),
                     enc_last_layer=self.get_last_layer(mode="enc"),
                     global_step=self.global_step,
@@ -1549,6 +1643,8 @@ class CosmosHyperspectralTokenizerTrainer:
                     tokenizer_feat=repa_low_lvl_feat,
                     tokenizer_feat2=semantic_feat,
                     phis_student_feature=out_d.get("phis_student_feature", None),
+                    diffusion_model=self.diffusion_model if getattr(self, "_use_diffusion", False) else None,
+                    diffusion_model_kwargs=None,
                     last_layer=self.get_last_layer(mode="dec"),
                     enc_last_layer=self.get_last_layer(mode="enc"),
                     global_step=self.global_step,
@@ -1646,6 +1742,53 @@ class CosmosHyperspectralTokenizerTrainer:
         if bad_params:
             raise RuntimeError(f"[NonFinite] {model_name} has non-finite params: {bad_params}")
 
+    @staticmethod
+    def _tensor_stats(prefix: str, x: torch.Tensor) -> dict[str, float]:
+        return {
+            f"{prefix}/min": x.min().item(),
+            f"{prefix}/max": x.max().item(),
+            f"{prefix}/mean": x.mean().item(),
+            f"{prefix}/std": x.std().item(),
+        }
+
+    @staticmethod
+    def _format_tensor_stats_log(label: str, prefix: str, stats: dict[str, float]) -> str:
+        return (
+            f"Image latent ({label}) status: min/max: ({stats[f'{prefix}/min']}, {stats[f'{prefix}/max']}), "
+            f"mean/std: ({stats[f'{prefix}/mean']}, {stats[f'{prefix}/std']})"
+        )
+
+    def _collect_and_format_latent_stats(self, out_d: edict) -> tuple[dict[str, float], list[str]]:
+        latent_status: dict[str, float] = {}
+        log_msgs: list[str] = []
+
+        latent_mixed = out_d.get("latent", None)
+        if torch.is_tensor(latent_mixed):
+            mixed_prefix = "latent/mixed"
+            mixed_stats = self._tensor_stats(mixed_prefix, latent_mixed)
+            latent_status.update(mixed_stats)
+            # Keep backward-compatible scalar names for existing dashboards.
+            latent_status.update(
+                {
+                    "latent/min": mixed_stats[f"{mixed_prefix}/min"],
+                    "latent/max": mixed_stats[f"{mixed_prefix}/max"],
+                    "latent/mean": mixed_stats[f"{mixed_prefix}/mean"],
+                    "latent/std": mixed_stats[f"{mixed_prefix}/std"],
+                }
+            )
+            log_msgs.append(self._format_tensor_stats_log("mixed", mixed_prefix, mixed_stats))
+
+        for branch_name, field_name in (("disc", "latent_quant"), ("cont", "latent_cont")):
+            branch_latent = out_d.get(field_name, None)
+            if not torch.is_tensor(branch_latent):
+                continue
+            branch_prefix = f"latent/{branch_name}"
+            branch_stats = self._tensor_stats(branch_prefix, branch_latent)
+            latent_status.update(branch_stats)
+            log_msgs.append(self._format_tensor_stats_log(branch_name, branch_prefix, branch_stats))
+
+        return latent_status, log_msgs
+
     def train_tokenizer_step(
         self,
         x: torch.Tensor,
@@ -1702,6 +1845,9 @@ class CosmosHyperspectralTokenizerTrainer:
         # step the optimizer and lr scheduler
         # backward
         self.tokenizer_optim.zero_grad()
+        if getattr(self, "_use_diffusion", False):
+            assert self.diffusion_optim is not None, "diffusion_optim should not be None when use_diffusion=True"
+            self.diffusion_optim.zero_grad()
 
         if _is_unified_proxy_task_forward:
             if self.proxy_optim is not None:
@@ -1716,6 +1862,9 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # optimizer step
         self.tokenizer_optim.step()
+        if getattr(self, "_use_diffusion", False):
+            assert self.diffusion_optim is not None, "diffusion_optim should not be None when use_diffusion=True"
+            self.diffusion_optim.step()
 
         if _is_unified_proxy_task_forward and proxy_has_grad:
             if self.proxy_optim is not None:
@@ -1727,6 +1876,9 @@ class CosmosHyperspectralTokenizerTrainer:
 
         # scheduler step
         self.tokenizer_sched.step()
+        if getattr(self, "_use_diffusion", False):
+            assert self.diffusion_sched is not None, "diffusion_sched should not be None when use_diffusion=True"
+            self.diffusion_sched.step()
 
         if self.antideg_net is not None:
             self.antideg_net_optim.step()
@@ -1824,7 +1976,7 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def train_step(self, batch: dict):
         # torch.autograd.set_detect_anomaly(True)
-        x = batch["img"].to(self.device, self.dtype)  # [-1, 1]
+        x = batch["img"].to(self.device, self.dtype, non_blocking=True)  # [-1, 1]
 
         quality_track_n = self.train_cfg.track_metrics_duration
         quality_track_after = self.train_cfg.track_metrics_after
@@ -1845,6 +1997,9 @@ class CosmosHyperspectralTokenizerTrainer:
         if self._use_disc:
             assert self.vq_loss_fn.discriminator is not None, "discriminator should not be None when use_disc=True"
             _accum_models.append(self.vq_loss_fn.discriminator)
+        if getattr(self, "_use_diffusion", False):
+            assert self.diffusion_model is not None, "diffusion_model should not be None when use_diffusion=True"
+            _accum_models.append(self.diffusion_model)
         if hasattr(self, "proxy_model"):
             _accum_models.append(self.proxy_model)
 
@@ -1975,16 +2130,9 @@ class CosmosHyperspectralTokenizerTrainer:
             self.log_msg(f"[Train Tok]: {_log_tok_losses}")
 
             #  ------- Latent infos ----------- #
-            latent_status = {
-                "latent/min": out_d.latent.min().item(),
-                "latent/max": out_d.latent.max().item(),
-                "latent/mean": out_d.latent.mean().item(),
-                "latent/std": out_d.latent.std().item(),
-            }
-            self.log_msg(
-                f"Image latent status: min/max: {latent_status['latent/min'], latent_status['latent/max']}, "
-                f"mean/std: {latent_status['latent/mean'], latent_status['latent/std']}"
-            )
+            latent_status, latent_log_msgs = self._collect_and_format_latent_stats(out_d)
+            for latent_log_msg in latent_log_msgs:
+                self.log_msg(latent_log_msg)
             if self._use_disc:
                 self.log_msg(f"[Train Disc]: {_log_disc_losses}")
 
@@ -2154,6 +2302,8 @@ class CosmosHyperspectralTokenizerTrainer:
             self.tokenizer_optim.eval()
             if self._use_disc and self.disc_optim is not None:
                 self.disc_optim.eval()
+            if getattr(self, "_use_diffusion", False) and self.diffusion_optim is not None:
+                self.diffusion_optim.eval()
 
         # set all mode
         def _set_all_model_modes(train=False):
@@ -2241,12 +2391,16 @@ class CosmosHyperspectralTokenizerTrainer:
         self.tokenizer_optim.zero_grad()
         if self._use_disc and self.disc_optim is not None:
             self.disc_optim.zero_grad()
+        if getattr(self, "_use_diffusion", False) and self.diffusion_optim is not None:
+            self.diffusion_optim.zero_grad()
 
         if hasattr(self.tokenizer_optim, "train"):
             self.log_msg("set optimizer to train mode (support for splus optimizer)")
             self.tokenizer_optim.train()
             if self._use_disc and self.disc_optim is not None:
                 self.disc_optim.train()
+            if getattr(self, "_use_diffusion", False) and self.diffusion_optim is not None:
+                self.diffusion_optim.train()
 
     def save_state(self):
         self.accelerator.save_state()
@@ -2424,6 +2578,12 @@ class CosmosHyperspectralTokenizerTrainer:
             self.train_cfg.finetune_strategy not in ["dcae_refine_decoder_head", "dcae_adapt_latent", "peft"]
             and not self.train_cfg.only_load_tokenizer
         )
+        if getattr(self, "_use_diffusion", False) and not (ema_path / "diffusion_model").exists():
+            self.log_msg(
+                "[Load EMA]: diffusion model checkpoint not found under ema path, keep current initialized diffusion model.",
+                level="WARNING",
+                warn_once=True,
+            )
         disc_ckpt_dir = ema_path / "discriminator"
         if not self._use_disc and (should_load_disc or disc_ckpt_dir.exists()):
             raise RuntimeError(
