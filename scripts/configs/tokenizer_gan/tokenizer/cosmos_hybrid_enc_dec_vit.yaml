@@ -24,12 +24,15 @@ cnn_cfg:
     block_name: res_block
     norm_type: trmsnorm2d #gn
     act_type: silu
-    adaptive_mode: interp
     downsample_kwargs:
       padconv_use_manually_pad: false
     upsample_kwargs:
       interp_type: nearest_interp
     per_layer_noise: false
+    adaptive_mode: cross_attn
+    adaptive_conv_kwargs:
+      cross_attn_pool_size: 4
+      cross_attn_embed_dim: 128
   quantizer_type: null
   vf_on_z_or_module: z
   use_repa_loss: true
@@ -81,5 +84,7 @@ distillation_cfg:
     semantic: [5, 11, 17, 23]
 
 hybrid_tokenizer_cfg:
-  latent_bottleneck_type: before_semantic
-  latent_straight_through_skip: true
+  latent_bottleneck_type: after_semantic
+  latent_straight_through_skip: false
+  decoder_use_ul_noisy_latent: false
+  decoder_ul_lambda0: 5.0

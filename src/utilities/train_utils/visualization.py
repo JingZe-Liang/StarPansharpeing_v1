@@ -35,6 +35,7 @@ type VisGTMapType = Image.Image | list[Image.Image] | Float[NDArray, "b h w"] | 
 RGB_CHANNELS_BY_BANDS = {
     3: [0, 1, 2],  # RGB: keep same
     4: [2, 1, 0],
+    6: [2, 1, 0],
     8: [4, 2, 0],
     10: [6, 5, 4],
     12: [3, 2, 1],

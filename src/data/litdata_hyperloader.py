@@ -1,7 +1,7 @@
 import random
-from collections import defaultdict
-from pathlib import Path
+from collections import defaultdict, deque
 from collections.abc import Iterable, Iterator
+from pathlib import Path
 from typing import Callable, Literal
 
 import numpy as np
@@ -19,7 +19,7 @@ import litdata as ld
 from loguru import logger
 from torch import Tensor
 from torch.utils.data.dataloader import default_collate
-from torchvision.transforms.functional import to_tensor
+from torchvision.transforms.functional import to_tensor  # ty: ignore[unresolved-import]
 from typing_extensions import Any, Optional, Union, cast
 
 import src.data.codecs  # register serializers and deserializers
@@ -983,6 +983,132 @@ class _TimedLoaderIterator:
             return next(self._iter)
 
 
+BatchDict = dict[str, Any]
+CacheKey = tuple[int, int]
+
+
+def _batch_sample_count(batch: BatchDict) -> int:
+    return int(batch["img"].shape[0])
+
+
+def _slice_batch(batch: BatchDict, start: int, stop: int) -> BatchDict:
+    return {key: value[start:stop] for key, value in batch.items()}
+
+
+def _merge_batch_values(values: list[Any]) -> Any:
+    first_value = values[0]
+    if torch.is_tensor(first_value):
+        return torch.cat(values, dim=0)
+    if isinstance(first_value, np.ndarray):
+        return np.concatenate(values, axis=0)
+    if isinstance(first_value, list):
+        return [item for value in values for item in value]
+    if isinstance(first_value, tuple):
+        return tuple(item for value in values for item in value)
+    raise TypeError(f"Unsupported batch value type for merge: {type(first_value)!r}")
+
+
+def _merge_batches(batches: list[BatchDict]) -> BatchDict:
+    if not batches:
+        raise ValueError("Cannot merge an empty batch list.")
+    keys = list(batches[0].keys())
+    return {key: _merge_batch_values([batch[key] for batch in batches]) for key in keys}
+
+
+class _SizedBatchCacheBucket:
+    def __init__(self) -> None:
+        self._batches: deque[BatchDict] = deque()
+        self._total_samples = 0
+
+    @property
+    def total_samples(self) -> int:
+        return self._total_samples
+
+    def append(self, batch: BatchDict) -> None:
+        batch_samples = _batch_sample_count(batch)
+        if batch_samples <= 0:
+            return
+        self._batches.append(batch)
+        self._total_samples += batch_samples
+
+    def pop_ready_batch(self, target_bs: int) -> BatchDict | None:
+        if self._total_samples < target_bs:
+            return None
+
+        fragments: list[BatchDict] = []
+        remaining_samples = target_bs
+
+        while remaining_samples > 0:
+            current_batch = self._batches[0]
+            current_samples = _batch_sample_count(current_batch)
+            take = min(remaining_samples, current_samples)
+            fragments.append(_slice_batch(current_batch, 0, take))
+
+            if take == current_samples:
+                self._batches.popleft()
+            else:
+                self._batches[0] = _slice_batch(current_batch, take, current_samples)
+
+            self._total_samples -= take
+            remaining_samples -= take
+
+        return _merge_batches(fragments)
+
+    def pop_all(self) -> BatchDict | None:
+        if self._total_samples == 0:
+            return None
+        merged_batch = _merge_batches(list(self._batches))
+        self.clear()
+        return merged_batch
+
+    def clear(self) -> None:
+        self._batches.clear()
+        self._total_samples = 0
+
+
+class OverfitBatchStreamingLoader:
+    def __init__(self, dataloader: Iterable[Any], overfit_n_batches: int) -> None:
+        if overfit_n_batches <= 0:
+            raise ValueError(f"overfit_n_batches must be positive, got {overfit_n_batches}")
+        self._dataloader = dataloader
+        self._overfit_n_batches = int(overfit_n_batches)
+        self._cached_batches: list[Any] | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._dataloader, name)
+
+    def __iter__(self) -> Iterator[Any]:
+        if self._cached_batches is None:
+            self._cached_batches = self._collect_batches()
+        return self._cycle_cached_batches()
+
+    def __len__(self) -> int:
+        return self._overfit_n_batches
+
+    def _collect_batches(self) -> list[Any]:
+        cached_batches: list[Any] = []
+        loader_iter = iter(self._dataloader)
+        for _ in range(self._overfit_n_batches):
+            try:
+                cached_batches.append(next(loader_iter))
+            except StopIteration:
+                break
+
+        if not cached_batches:
+            raise ValueError("Cannot enable overfit loader because the dataloader produced no batches")
+
+        logger.warning(
+            f"Overfit loader enabled: caching {len(cached_batches)} batch(es) and replaying them forever",
+            not_rank0_print=True,
+        )
+        return cached_batches
+
+    def _cycle_cached_batches(self) -> Iterator[Any]:
+        assert self._cached_batches is not None, "cached batches should be initialized before cycling"
+        while True:
+            yield from self._cached_batches
+
+
 class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
     def __init__(
         self,
@@ -1019,124 +1145,84 @@ class SizeBasedBatchsizeStreamingDataloader(StreamingDataLoader):
         self.cache_minor = cache_minor
 
         if self.cache_minor:
-            self._size_caches: dict[tuple[int, int], list] = defaultdict(list)
+            self._size_caches: defaultdict[CacheKey, _SizedBatchCacheBucket] = defaultdict(_SizedBatchCacheBucket)
 
-    def _yield_from_cache(self, channel: int, size: int):
-        cache_key = (channel, size)
-        if cache_key not in self._size_caches:
-            return
+    def _get_cache_key(self, batch: BatchDict) -> CacheKey:
+        img = batch["img"]
+        return (int(img.shape[1]), int(img.shape[-1]))
 
-        target_bs = self.size_bs_s[size]
-        assert target_bs is not None, f"Batch size cannot be None for size {size} in cache"
-        cache = self._size_caches[cache_key]
+    def _get_target_batch_size(self, size: int) -> int | None:
+        target_bs = self.size_bs_s.get(size)
+        if target_bs is None:
+            return None
+        return int(target_bs)
 
-        total_samples = sum(batch["img"].shape[0] for batch in cache)
-        if total_samples > 64:
-            logger.warning(f"Cache for {cache_key} is too large, total samples: {total_samples}")
+    def _yield_direct_sized_batches(self, batch: BatchDict, target_bs: int) -> Iterator[BatchDict]:
+        total_samples = _batch_sample_count(batch)
+        offset = 0
 
-        while total_samples >= target_bs:
-            collected_samples = []
-            collected_keys = None
-            samples_collected = 0
+        while offset + target_bs <= total_samples:
+            yield _slice_batch(batch, offset, offset + target_bs)
+            offset += target_bs
 
-            while cache and samples_collected < target_bs:
-                batch = cache[0]
-                batch_samples = batch["img"].shape[0]
+        if offset < total_samples:
+            yield _slice_batch(batch, offset, total_samples)
 
-                if collected_keys is None:
-                    collected_keys = list(batch.keys())
-                    collected_samples = {k: [] for k in collected_keys}
-                assert collected_keys is not None
+    def _yield_cached_batches(self, cache_key: CacheKey, batch: BatchDict, target_bs: int) -> Iterator[BatchDict]:
+        bucket = self._size_caches[cache_key]
+        bucket.append(batch)
 
-                needed = target_bs - samples_collected
-                take = min(needed, batch_samples)
+        if bucket.total_samples > 64:
+            logger.warning(f"Cache for {cache_key} is too large, total samples: {bucket.total_samples}")
 
-                for k in collected_keys:
-                    collected_samples[k].append(batch[k][:take])
+        while True:
+            ready_batch = bucket.pop_ready_batch(target_bs)
+            if ready_batch is None:
+                break
+            yield ready_batch
 
-                samples_collected += take
-
-                if take == batch_samples:
-                    cache.pop(0)
-                else:
-                    for k in collected_keys:
-                        batch[k] = batch[k][take:]
-
-            if samples_collected == target_bs:
-                final_batch = {}
-                assert collected_keys is not None
-                for k in collected_keys:
-                    if torch.is_tensor(collected_samples[k][0]):
-                        final_batch[k] = torch.cat(collected_samples[k], dim=0)
-                    else:
-                        final_batch[k] = [item for sublist in collected_samples[k] for item in sublist]
-
-                yield final_batch
-
-                total_samples = sum(batch["img"].shape[0] for batch in cache)
-
-    def _add_to_cache(self, batch: dict, channel: int, size: int):
-        cache_key = (channel, size)
-        self._size_caches[cache_key].append(batch)
+    def _should_drop_last(self) -> bool:
+        dataset = getattr(self, "dataset", None)
+        return bool(getattr(dataset, "drop_last", False))
 
     def _yield_remaining_cache(self):
-        for (channel, size), batches in self._size_caches.items():
-            if batches:
-                final_batch = {}
-                _keys = batches[0].keys()
-                for key in _keys:
-                    if torch.is_tensor(batches[0][key]):
-                        final_batch[key] = torch.cat([b[key] for b in batches], dim=0)
-                        logger.debug(f"Yielding batch of size {final_batch['img'].shape}")
-                    else:
-                        final_batch[key] = [item for sublist in batches for item in sublist[key]]
+        drop_last = self._should_drop_last()
 
+        for cache_key, bucket in self._size_caches.items():
+            if bucket.total_samples == 0:
+                continue
+            if drop_last:
+                logger.warning(
+                    f"Dropping {bucket.total_samples} cached samples for {cache_key} because drop_last=True."
+                )
+                bucket.clear()
+                continue
+
+            final_batch = bucket.pop_all()
+            if final_batch is not None:
+                logger.debug(f"Yielding cached remainder batch of size {final_batch['img'].shape}")
                 yield final_batch
 
-        if len(self._size_caches) > 0:
-            logger.warning("Still has some cache in, may leak some samples.")
         self._size_caches.clear()
 
     def __iter__(self):
         for batch in super().__iter__():
             if batch is None:
                 continue
-            img = batch["img"]
-            size = img.shape[-1]  # bs, c, h, w
-            channel = img.shape[1]  # bs, c, h, w
 
-            if size not in self.size_bs_s or self.size_bs_s[size] is None:
+            cache_key = self._get_cache_key(batch)
+            _, size = cache_key
+            target_bs = self._get_target_batch_size(size)
+
+            if target_bs is None:
                 yield batch
                 continue
 
             if self.cache_minor:
-                yield from self._yield_from_cache(channel, size)
+                yield from self._yield_cached_batches(cache_key, batch, target_bs)
+                continue
 
-            if size in self.size_bs_s:
-                target_bs = self.size_bs_s[size]
-                assert target_bs is not None, f"Batch size cannot be None for size {size}"
-                cur_bs = img.shape[0]
-
-                if cur_bs >= target_bs:
-                    for i in range(0, cur_bs, target_bs):
-                        yield {k: v[i : i + target_bs] for k, v in batch.items()}
-                else:
-                    if self.cache_minor:
-                        # logger.warning(
-                        #     f"[Size based DL]: Current batch size {cur_bs} (channel {channel}) is smaller than "
-                        #     f"target batch size {target_bs} for size {size}. Added to cache.",
-                        #     once_pattern=r"\[Size based DL]\: Current batch size .*",
-                        # )
-                        self._add_to_cache(batch, channel, size)
-                    else:
-                        # logger.warning(
-                        #     f"[Size based DL]: Current batch size {cur_bs} (channel {channel}) is smaller than "
-                        #     f"target batch size {target_bs} for size {size}. Added to cache.",
-                        #     once_pattern=r"\[Size based DL]\: .* is smaller than .*",
-                        # )
-                        yield batch
-            else:
-                yield batch
+            yield from self._yield_direct_sized_batches(batch, target_bs)
 
         if self.cache_minor:
             yield from self._yield_remaining_cache()
@@ -1240,24 +1326,38 @@ def create_hyper_image_litdata_flatten_paths_loader(
         512: 6,
     },
     use_itered_cycle: bool = True,
+    overfit_n_batches: int | None = None,
     _collect_stats: bool = False,
-) -> tuple[list[StreamingDataset], StreamingDataLoader]:
-    def _flatten_paths(d: dict[str, Any]) -> dict[str, list]:
-        res: dict[str, list] = {}
+) -> tuple[list[StreamingDataset], StreamingDataLoader | OverfitBatchStreamingLoader]:
+    type PathGroup = tuple[Any, dict[str, Any]]
+
+    def _normalize_path_group(raw_group: Any) -> PathGroup:
+        if not isinstance(raw_group, (list, tuple)) or len(raw_group) != 2:
+            raise TypeError(f"Each dataset group must be a pair of [paths, kwargs], got: {raw_group}")
+
+        ds_paths, ds_kwargs = raw_group
+        if ds_kwargs is None:
+            return ds_paths, {}
+        if not isinstance(ds_kwargs, dict):
+            raise TypeError(f"Dataset kwargs must be a dict, got: {type(ds_kwargs)}")
+        return ds_paths, ds_kwargs
+
+    def _flatten_paths(d: dict[str, Any]) -> dict[str, PathGroup]:
+        res: dict[str, PathGroup] = {}
         for k, v in d.items():
             if isinstance(v, dict):
                 res.update(_flatten_paths(v))
             else:
-                res[k] = v
+                res[k] = _normalize_path_group(v)
         return res
 
     # Flatten all files
-    paths_dict: dict[str, list]
+    paths_dict: dict[str, PathGroup]
     if isinstance(paths, dict):
         paths_dict = _flatten_paths(paths)
     else:
         # If it's already a flat list or other type, wrap it
-        paths_dict = {"default": [paths, {}]}
+        paths_dict = {"default": (paths, {})}
 
     def _as_paths_list(ds_paths: Any) -> list[str]:
         if isinstance(ds_paths, str):
@@ -1268,7 +1368,7 @@ def create_hyper_image_litdata_flatten_paths_loader(
             return ds_paths
         raise TypeError(f"`ds_paths` must be str or list[str], got: {type(ds_paths)}")
 
-    expanded_datasets: list[Any] = []
+    expanded_datasets: list[StreamingDataset] = []
     expanded_weights: list[float] = []
 
     if weights is not None and len(weights) != len(paths_dict):
@@ -1276,6 +1376,8 @@ def create_hyper_image_litdata_flatten_paths_loader(
 
     for group_idx, (name, (ds_paths, ds_kwargs)) in enumerate(paths_dict.items()):
         ds_kwargs = set_defaults(ds_kwargs, stream_ds_kwargs)
+        if not isinstance(ds_kwargs, dict):
+            raise TypeError(f"Dataset kwargs must be a dict after applying defaults, got: {type(ds_kwargs)}")
         is_cycled = bool(ds_kwargs.pop("is_cycled", False))
         ds_paths_list = _as_paths_list(ds_paths)
 
@@ -1343,6 +1445,8 @@ def create_hyper_image_litdata_flatten_paths_loader(
         cache_minor=True,
         **loader_kwargs,
     )
+    if overfit_n_batches is not None and overfit_n_batches > 0:
+        dataloader = OverfitBatchStreamingLoader(dataloader, overfit_n_batches)
 
     # statistics
     if _collect_stats:
@@ -1351,7 +1455,7 @@ def create_hyper_image_litdata_flatten_paths_loader(
         logger.warning("Collecting statistics...")
 
         bands_info_n = {}
-        for i, sample in tqdm(  # type: ignore
+        for i, sample in tqdm(
             enumerate(dataloader),
             # total=len(ds_total) // dl.batch_size,
         ):
@@ -1390,6 +1494,7 @@ def get_fast_test_hyper_litdata_load(
         "fmow_MS",
         "SAM270k",
         "HSIGene",
+        "hyspectnet11k",
     ] = "RS5M",
     batch_size: int = 8,
     stream_ds_kwargs: dict[str, Any] | None = None,
@@ -1460,6 +1565,10 @@ def get_fast_test_hyper_litdata_load(
         },
         "HSIGene": {
             "paths": ["data2/HSIGene_dataset/LitData_hyper_images/train"],
+            "overrides": {"resize_before_transform": 256, "is_hwc": True},
+        },
+        "hyspectnet11k": {
+            "paths": ["data/hyspecnet11k/LitData_hyper_images"],
             "overrides": {"resize_before_transform": 256, "is_hwc": True},
         },
     }
@@ -1754,7 +1863,7 @@ if __name__ == "__main__":
     # create_hyper_image_litdata_loader()
     # create_hyper_image_litdata_flatten_paths_loader()
     # __test_index_file_litdata_loader()
-    # __test_normal_image_loader()
+    __test_normal_image_loader()
     # __test_gen_loader()
     # __test_ds_len()
     # __test_get_item_key()

@@ -79,6 +79,7 @@ class BinarySphericalQuantizer(nn.Module):
         cb_entropy_compute="group",
         l2_norm=False,
         inv_temperature=1.0,
+        flip_bit_prob=0.0,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -86,6 +87,7 @@ class BinarySphericalQuantizer(nn.Module):
         self.gamma0 = gamma0  # loss weight for entropy penalty
         self.gamma = gamma  # loss weight for entropy penalty
         self.zeta = zeta  # loss weight for entire entropy penalty
+        self.flip_bit_prob = flip_bit_prob
         self.input_format = input_format
         assert self.embed_dim % group_size == 0, (
             f"embed_dim {self.embed_dim} must be divisible by group_size {group_size}"
@@ -118,6 +120,16 @@ class BinarySphericalQuantizer(nn.Module):
         self.register_buffer("group_codebook", group_codebook, persistent=False)
 
         self.soft_entropy = soft_entropy  # soft_entropy: Sec 3.2 of https://arxiv.org/pdf/1911.05894.pdf
+
+    def apply_flip_bit_aug(self, zq: torch.Tensor) -> torch.Tensor:
+        """Apply bit flip augmentation on quantized latent codes during training."""
+        if (not self.training) or self.flip_bit_prob <= 0.0:
+            return zq
+
+        flip_mask = torch.rand_like(zq) < self.flip_bit_prob
+        zq_aug = zq.clone()
+        zq_aug[flip_mask] = -zq_aug[flip_mask]
+        return zq_aug
 
     def quantize(self, z):
         assert z.shape[-1] == self.embed_dim, f"Expected {self.embed_dim} dimensions, got {z.shape[-1]}"
@@ -153,18 +165,22 @@ class BinarySphericalQuantizer(nn.Module):
         q_scale = 1.0 / (self.embed_dim**0.5) if self.l2_norm else 1.0
         zq = zq * q_scale
 
+        # Keep indices and losses tied to the original quantized codes. The flip augmentation
+        # only perturbs the latent passed downstream, matching the MultiScaleBSQ wrapper logic.
+        zq_aug = self.apply_flip_bit_aug(zq)
+
         # commit loss
         commit_loss = self.beta * torch.mean(((zq.detach() - z) ** 2).sum(dim=-1))
 
         if self.input_format == "bchw":
-            zq = rearrange(zq, "b h w c -> b c h w")
+            zq_aug = rearrange(zq_aug, "b h w c -> b c h w")
 
         # entropy penalty loss
         H_penalty_loss = self.zeta * entropy_penalty / self.inv_temperature
 
         total_loss = commit_loss + H_penalty_loss
         return (
-            zq,
+            zq_aug,
             total_loss,
             edict(
                 commit_loss=commit_loss,
@@ -180,7 +196,7 @@ class BinarySphericalQuantizer(nn.Module):
     def soft_entropy_loss(self, z):
         # if we divide the code in subgroups of size group_size, the codebook will be of size 2 ** group_size
         # the sub-code is the last group_size bits of the full code
-        group_code_book = self.group_codebook / (self.embed_dim**0.5 if self.l2_norm else 1)
+        group_code_book = torch.as_tensor(self.group_codebook) / (self.embed_dim**0.5 if self.l2_norm else 1)
         divided_z = rearrange(z, "... (g c) -> ... g c", c=self.group_size)
 
         # we calculate the distance between the divided_z and the codebook for each subgroup
@@ -230,13 +246,15 @@ class BinarySphericalQuantizer(nn.Module):
     def indexes_to_codes(self, indices):
         """Inverse of `indexes_to_codes`."""
         indices = indices.unsqueeze(-1)
-        codes_non_centered = torch.remainder(torch.floor_divide(indices, self.basis), 2)
+        basis = torch.as_tensor(self.basis)
+        codes_non_centered = torch.remainder(torch.floor_divide(indices, basis), 2)
         return codes_non_centered * 2 - 1
 
     def group_indexes_to_codes(self, group_indices):
         """Inverse of `group_indexes_to_codes`."""
         group_indices = group_indices.unsqueeze(-1)
-        codes_non_centered = torch.remainder(torch.floor_divide(group_indices, self.group_basis), 2)
+        group_basis = torch.as_tensor(self.group_basis)
+        codes_non_centered = torch.remainder(torch.floor_divide(group_indices, group_basis), 2)
         codes_non_centered = rearrange(codes_non_centered, "b ... g c -> b ... (g c)")
         return codes_non_centered * 2 - 1
 
@@ -253,7 +271,8 @@ class BinarySphericalQuantizer(nn.Module):
         q_scale = 1.0 / (self.embed_dim**0.5) if self.l2_norm else 1.0
         z_q = z_q * q_scale
         if self.input_format == "bchw":
-            h, w = int(z_q.shape[1] ** 0.5)
+            h = int(z_q.shape[1] ** 0.5)
+            w = h
             assert h * w == z_q.shape[1], "Invalid sequence length"
             z_q = rearrange(z_q, "b (h w) c -> b c h w", h=h)
         return z_q
@@ -263,7 +282,8 @@ class BinarySphericalQuantizer(nn.Module):
         q_scale = 1.0 / (self.embed_dim**0.5) if self.l2_norm else 1.0
         z_q = z_q * q_scale
         if self.input_format == "bchw":
-            h, w = int(z_q.shape[1] ** 0.5)
+            h = int(z_q.shape[1] ** 0.5)
+            w = h
             assert h * w == z_q.shape[1], "Invalid sequence length"
             z_q = rearrange(z_q, "b (h w) c -> b c h w", h=h)
         return z_q

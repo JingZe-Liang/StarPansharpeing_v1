@@ -117,7 +117,7 @@ class MaskCollator(object):
         # --
         return mask, mask_complement
 
-    def __call__(self, batch):
+    def __call__(self, batch: list | tuple | torch.Tensor):
         """
         Create encoder and predictor masks when collating imgs into a batch
         # 1. sample enc block (size + location) using seed
@@ -197,3 +197,17 @@ def repeat_interleave_batch(x: Tensor, B: int, repeat: int):
         dim=0,
     )
     return x
+
+
+if __name__ == "__main__":
+    from src.utilities.train_utils.time import time_recorder
+
+    collator = MaskCollator(npred=4, min_keep=10)
+    batch = torch.randn(4, 3, 224, 244)
+
+    for _ in range(10):
+        with time_recorder.record("mask_collator"):
+            collated_batch, collated_masks_enc, collated_masks_pred = collator(batch)
+    time_recorder.print_table()
+    # print(collated_masks_enc.shape)
+    # print(collated_masks_pred.shape)

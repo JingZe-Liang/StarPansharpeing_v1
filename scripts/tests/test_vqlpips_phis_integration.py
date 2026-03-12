@@ -182,6 +182,32 @@ def test_vqlpips_phis_requires_student_feature_when_enabled(monkeypatch: pytest.
         )
 
 
+def test_vqlpips_phis_loss_waits_for_its_own_start_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gan_loss_module, "PhiSMultipleTeacherDistillLoss", _DummyPhiSMultipleTeacherDistillLoss)
+
+    loss_fn = VQLPIPSWithDiscriminator(
+        disc_network_type="none",
+        disc_weight=0.0,
+        phis_start_for_g=10,
+        perceptual_weight=0.0,
+        quantizer_type=None,
+        ssim_weight=0.0,
+        phis_loss_weight=3.0,
+        phis_loss_options={"teacher_configs": {"dino": {}}, "teacher_dims": {"dino": [4]}},
+    )
+
+    losses, logs = loss_fn(
+        inputs=torch.zeros(2, 3, 8, 8),
+        reconstructions=torch.zeros(2, 3, 8, 8),
+        optimizer_idx=0,
+        global_step=5,
+    )
+
+    assert "gen_loss" in losses
+    assert "phis_loss" in logs
+    assert torch.isclose(logs["phis_loss"], torch.tensor(0.0))
+
+
 def test_phis_teacher_not_in_state_dict_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.stage1.utilities.losses.repa.repa_feature_loss as repa_module
 

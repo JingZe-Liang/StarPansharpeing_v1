@@ -15,49 +15,57 @@ except Exception as e:
     logger.warning(f"Exception: {e}")
     TritonRMSNorm2dFunc = None  # type: ignore
 
+TE_ENABLED = False
+try:
+    import transformer_engine as te
 
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5, bias: bool = False):
-        super().__init__()
-        self.dim = dim
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32)) if bias else None
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        r"""
-        Args:
-            x(Tensor): Shape [B, L, C]
-        """
-        y = self._norm(x.float()).type_as(x) * self.weight
-        if self.bias is not None:
-            y = y + self.bias
-        return y
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+    TE_ENABLED = True
+except:
+    te = None
 
 
-class RMSNorm2d(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5, bias: bool = False):
-        super().__init__()
-        self.dim = dim
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32)) if bias else None
+# class RMSNorm(nn.Module):
+#     def __init__(self, dim: int, eps: float = 1e-5, bias: bool = False):
+#         super().__init__()
+#         self.dim = dim
+#         self.eps = eps
+#         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+#         self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32)) if bias else None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        r"""
-        Args:
-            x(Tensor): Shape [B, C, H, W]
-        """
-        y = self._norm(x.float()).type_as(x) * self.weight.view(1, -1, 1, 1)
-        if self.bias is not None:
-            y = y + self.bias.view(1, -1, 1, 1)
-        return y
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         r"""
+#         Args:
+#             x(Tensor): Shape [B, L, C]
+#         """
+#         y = self._norm(x.float()).type_as(x) * self.weight
+#         if self.bias is not None:
+#             y = y + self.bias
+#         return y
 
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(dim=1, keepdim=True) + self.eps)
+#     def _norm(self, x: torch.Tensor) -> torch.Tensor:
+#         return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+
+
+# class RMSNorm2d(nn.Module):
+#     def __init__(self, dim: int, eps: float = 1e-5, bias: bool = False):
+#         super().__init__()
+#         self.dim = dim
+#         self.eps = eps
+#         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+#         self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32)) if bias else None
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         r"""
+#         Args:
+#             x(Tensor): Shape [B, C, H, W]
+#         """
+#         y = self._norm(x.float()).type_as(x) * self.weight.view(1, -1, 1, 1)
+#         if self.bias is not None:
+#             y = y + self.bias.view(1, -1, 1, 1)
+#         return y
+
+#     def _norm(self, x: torch.Tensor) -> torch.Tensor:
+#         return x * torch.rsqrt(x.pow(2).mean(dim=1, keepdim=True) + self.eps)
 
 
 class Qwen3NextRMSNorm(nn.Module):
@@ -81,10 +89,6 @@ class Qwen3NextRMSNorm(nn.Module):
 
 
 class TritonRMSNorm2d(nn.LayerNorm):
-    def zero_out(self):
-        nn.init.constant_(self.weight, 0)
-        nn.init.constant_(self.bias, 0)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         assert TritonRMSNorm2dFunc is not None, "TritonRMSNorm2dFunc is not available."
 
@@ -132,6 +136,23 @@ class AdaptiveGroupNorm(nn.Module):
 # GatedNorm from Qwen team
 
 
+def _create_rmsnorm(dim: int, fuse=True, force_fp32=False, is_2d=False, use_te=False, **kwargs):
+    if not fuse:
+        if not is_2d:
+            if use_te and TE_ENABLED:
+                return te.pytorch.RMSNorm(dim, **kwargs)
+            return create_norm_layer("rmsnormfp32" if force_fp32 else "rmsnorm", dim, **kwargs)
+        else:
+            return create_norm_layer("rmsnorm2dfp32" if force_fp32 else "rmsnorm2d", dim, **kwargs)
+    else:
+        if not is_2d:
+            from flash_attn.ops.triton.layer_norm import RMSNorm
+
+            return RMSNorm(dim, **kwargs)
+        else:
+            return TritonRMSNorm2d(dim, **kwargs)
+
+
 class PreAffineRMSNorm(nn.Module):
     """
     PreAffine + RMSNorm
@@ -140,10 +161,10 @@ class PreAffineRMSNorm(nn.Module):
     PreAffine is a learnable per-channel scaling applied BEFORE RMSNorm.
     """
 
-    def __init__(self, dim: int, eps: float = 1e-6, bias: bool = False, force_fp32=False):
+    def __init__(self, dim: int, eps: float = 1e-6, bias: bool = False, force_fp32=False, fuse=True, use_te=False):
         super().__init__()
         self.pre_affine = nn.Parameter(torch.ones(dim))  # λ1 in the paper's spirit
-        self.norm = create_norm_layer("rmsnormfp32" if force_fp32 else "rmsnorm", dim)
+        self.norm = _create_rmsnorm(dim, fuse=fuse, eps=eps, force_fp32=force_fp32, use_te=use_te)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x * self.pre_affine
@@ -156,10 +177,10 @@ class PreAffineRMSNorm2d(nn.Module):
     x -> (lambda * x) -> RMSNorm2d -> *weight (+bias optional)
     """
 
-    def __init__(self, dim: int, eps: float = 1e-6, bias: bool = False, force_fp32=False):
+    def __init__(self, dim: int, eps: float = 1e-6, bias: bool = False, force_fp32=False, fuse=True, use_te=False):
         super().__init__()
         self.pre_affine = nn.Parameter(torch.ones(dim))
-        self.norm = create_norm_layer("rmsnorm2dfp32" if force_fp32 else "rmsnorm2d", dim)
+        self.norm = _create_rmsnorm(dim, fuse=fuse, eps=eps, force_fp32=force_fp32, use_te=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x * self.pre_affine.view(1, -1, 1, 1)
@@ -236,9 +257,11 @@ class GatedRMSNorm(nn.Module):
         dropout: float = 0.0,
         bias: bool = False,
         force_fp32: bool = False,
+        fuse: bool = False,
+        use_te: bool = False,
     ):
         super().__init__()
-        self.norm = create_norm_layer("rmsnormfp32" if force_fp32 else "rmsnorm", dim)
+        self.norm = _create_rmsnorm(dim, fuse=fuse, eps=eps, force_fp32=force_fp32, use_te=use_te)
         self.gate = _GatedNorm(dim=dim, rank=rank, dropout=dropout)
         self.force_fp32 = force_fp32
 
@@ -267,10 +290,11 @@ class PreAffineGatedRMSNorm(nn.Module):
         dropout: float = 0.0,
         bias: bool = False,
         force_fp32: bool = False,
+        fuse: bool = False,
     ):
         super().__init__()
         self.pre = nn.Parameter(torch.ones(dim))
-        self.norm = create_norm_layer("rmsnormfp32" if force_fp32 else "rmsnorm", dim)
+        self.norm = _create_rmsnorm(dim, fuse=fuse, eps=eps, force_fp32=force_fp32)
         self.gate = _GatedNorm(dim=dim, rank=rank, dropout=dropout)
         self.force_fp32 = force_fp32
 
@@ -299,9 +323,11 @@ class GatedRMSNorm2d(nn.Module):
         dropout: float = 0.0,
         bias: bool = False,
         force_fp32: bool = False,
+        fuse: bool = False,
+        use_te: bool = False,  # compactbility: TE does not support 2d rmsnorm
     ):
         super().__init__()
-        self.norm = create_norm_layer("rmsnorm2dfp32" if force_fp32 else "rmsnorm2d", dim)
+        self.norm = _create_rmsnorm(dim, fuse=fuse, eps=eps, force_fp32=force_fp32, is_2d=True)
         self.gate = _GatedNorm2d(dim=dim, rank=rank, dropout=dropout)
         self.force_fp32 = force_fp32
 
@@ -329,10 +355,12 @@ class PreAffineGatedRMSNorm2d(nn.Module):
         dropout: float = 0.0,
         bias: bool = False,
         force_fp32: bool = False,
+        fuse=False,
+        use_te: bool = False,  # compactbility: TE does not support 2d rmsnorm
     ):
         super().__init__()
         self.pre = nn.Parameter(torch.ones(dim))
-        self.norm = create_norm_layer("rmsnorm2dfp32" if force_fp32 else "rmsnorm2d", dim)
+        self.norm = _create_rmsnorm(dim, fuse=fuse, eps=eps, force_fp32=force_fp32, is_2d=True)
         self.gate = _GatedNorm2d(dim=dim, rank=rank, dropout=dropout)
         self.force_fp32 = force_fp32
 
@@ -488,22 +516,25 @@ def _register_new_norms():
                     eps=eps,
                 )
 
-        create_norm._NORM_MAP.update(  # type: ignore
-            {"flarmsnorm": FlaRMSNorm, "flalayernorm": FlaLayerNorm}
-        )
+        create_norm._NORM_MAP.update({"flarmsnorm": FlaRMSNorm, "flalayernorm": FlaLayerNorm})
         logger.debug(f'[Timm regsitered new norms]: "flarmsnorm", "flalayernorm"')
     except ImportError:
         logger.debug("FLA not available, skipping FLA norms registration")
 
-    create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm  # type: ignore
-    create_norm._NORM_MAP["tritonrmsnorm2d"] = TritonRMSNorm2d  # type: ignore
+    create_norm._NORM_MAP["zeromeanrmsnorm"] = Qwen3NextRMSNorm
+    create_norm._NORM_MAP["tritonrmsnorm2d"] = TritonRMSNorm2d
     create_norm._NORM_MAP["trmsnorm2d"] = TritonRMSNorm2d
-    create_norm._NORM_MAP["adaptivegroupnorm"] = AdaptiveGroupNorm  # type: ignore
-    create_norm._NORM_MAP["gatedrmsnorm"] = GatedRMSNorm  # type: ignore
-    create_norm._NORM_MAP["preaffinegatedrmsnorm"] = PreAffineGatedRMSNorm  # type: ignore
-    create_norm._NORM_MAP["gatedrmsnorm2d"] = GatedRMSNorm2d  # type: ignore
-    create_norm._NORM_MAP["preaffinegatedrmsnorm2d"] = PreAffineGatedRMSNorm2d  # type: ignore
-    logger.debug(f"[Timm registered new norms]: 'zeromeanrmsnorm', 'flashrmsnorm', 'tritonrmsnorm2d'")
+    create_norm._NORM_MAP["adaptivegroupnorm"] = AdaptiveGroupNorm
+    create_norm._NORM_MAP["gatedrmsnorm"] = GatedRMSNorm
+    create_norm._NORM_MAP["preaffinegatedrmsnorm"] = PreAffineGatedRMSNorm
+    create_norm._NORM_MAP["gatedrmsnorm2d"] = GatedRMSNorm2d
+    create_norm._NORM_MAP["preaffinegatedrmsnorm2d"] = PreAffineGatedRMSNorm2d
+
+    if TE_ENABLED and te is not None:
+        create_norm._NORM_MAP["termsnorm"] = te.pytorch.RMSNorm
+        create_norm._NORM_MAP["telayernorm"] = te.pytorch.LayerNorm
+
+    # logger.debug(f"[Timm registered new norms]: 'zeromeanrmsnorm', 'flashrmsnorm', 'tritonrmsnorm2d'")
 
 
 _register_new_acts()

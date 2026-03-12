@@ -51,6 +51,7 @@ def _rms_norm_2d_fwd_fused(
     stride_rn,
     num_blocks,  # number of columns in X
     eps,  # epsilon to avoid division by zero
+    HAS_BIAS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
@@ -71,7 +72,7 @@ def _rms_norm_2d_fwd_fused(
     # Normalize and apply linear transformation
     for off in range(0, C):
         w = tl.load(W + off)
-        b = tl.load(B + off)
+        b = tl.load(B + off) if HAS_BIAS else 0.0
         x_ptr = X + m * stride_xm + off * stride_xc + cols * stride_xn
         y_ptr = Y + m * stride_ym + off * stride_yc + cols * stride_yn
         x = tl.load(x_ptr, mask=mask, other=0.0).to(tl.float32)
@@ -104,6 +105,7 @@ def _rms_norm_2d_bwd_dx_fused(
     stride_rm,
     stride_rn,
     num_blocks,
+    HAS_BIAS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     # Map the program id to the elements of X, DX, and DY it should compute.
@@ -132,7 +134,8 @@ def _rms_norm_2d_bwd_dx_fused(
         c1 += xhat * wdy
         # Accumulate partial sums for dw/db
         tl.store(DW + off, tl.sum(dy * xhat, axis=0))
-        tl.store(DB + off, tl.sum(dy, axis=0))
+        if HAS_BIAS:
+            tl.store(DB + off, tl.sum(dy, axis=0))
 
     c1 /= C
     for off in range(0, C):
@@ -150,12 +153,14 @@ def _rms_norm_2d_bwd_dx_fused(
 
 class TritonRMSNorm2dFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float) -> torch.Tensor:
+    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None, eps: float) -> torch.Tensor:
         # allocate output
         y = torch.empty_like(x)
 
         x_arg = x.reshape(x.shape[0], x.shape[1], -1)
         y_arg = y.reshape_as(x_arg)
+        bias_arg = bias if bias is not None else weight
+        has_bias = bias is not None
         M, C, N = x_arg.shape
         rrms = torch.empty((M, N), dtype=torch.float32, device=x.device)
         BLOCK_SIZE = 256
@@ -163,39 +168,68 @@ class TritonRMSNorm2dFunc(torch.autograd.Function):
         num_warps = 8
 
         fwd_kernel = _rms_norm_2d_fwd_fused[(M * num_blocks,)]
-        fwd_kernel(
-            x_arg,
-            y_arg,
-            weight,
-            bias,
-            rrms,
-            M,
-            C,
-            N,
-            x_arg.stride(0),
-            x_arg.stride(1),
-            x_arg.stride(2),
-            y_arg.stride(0),
-            y_arg.stride(1),
-            y_arg.stride(2),
-            rrms.stride(0),
-            rrms.stride(1),
-            num_blocks,
-            eps,
-            BLOCK_SIZE=BLOCK_SIZE,  # type: ignore
-            num_warps=num_warps,  # type: ignore
-            num_ctas=1,  # type: ignore
-        )
-        ctx.save_for_backward(x_arg, weight, bias, rrms)
+        if has_bias:
+            fwd_kernel(
+                x_arg,
+                y_arg,
+                weight,
+                bias_arg,
+                rrms,
+                M,
+                C,
+                N,
+                x_arg.stride(0),
+                x_arg.stride(1),
+                x_arg.stride(2),
+                y_arg.stride(0),
+                y_arg.stride(1),
+                y_arg.stride(2),
+                rrms.stride(0),
+                rrms.stride(1),
+                num_blocks,
+                eps,
+                HAS_BIAS=True,  # type: ignore
+                BLOCK_SIZE=BLOCK_SIZE,  # type: ignore
+                num_warps=num_warps,  # type: ignore
+                num_ctas=1,  # type: ignore
+            )
+        else:
+            fwd_kernel(
+                x_arg,
+                y_arg,
+                weight,
+                bias_arg,
+                rrms,
+                M,
+                C,
+                N,
+                x_arg.stride(0),
+                x_arg.stride(1),
+                x_arg.stride(2),
+                y_arg.stride(0),
+                y_arg.stride(1),
+                y_arg.stride(2),
+                rrms.stride(0),
+                rrms.stride(1),
+                num_blocks,
+                eps,
+                HAS_BIAS=False,  # type: ignore
+                BLOCK_SIZE=BLOCK_SIZE,  # type: ignore
+                num_warps=num_warps,  # type: ignore
+                num_ctas=1,  # type: ignore
+            )
+        ctx.save_for_backward(x_arg, weight, rrms)
+        ctx.has_bias = has_bias
         ctx.BLOCK_SIZE = BLOCK_SIZE
         ctx.num_blocks = num_blocks
         ctx.num_warps = num_warps
         return y
 
     @staticmethod
-    def backward(ctx, dy: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
-        x_arg, w, b, rrms = ctx.saved_tensors
+    def backward(ctx, dy: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None]:
+        x_arg, w, rrms = ctx.saved_tensors
         num_blocks = ctx.num_blocks
+        has_bias: bool = ctx.has_bias
 
         dy_arg = dy.reshape_as(x_arg)
         M, C, N = x_arg.shape
@@ -203,35 +237,65 @@ class TritonRMSNorm2dFunc(torch.autograd.Function):
         dx_arg = dx.reshape_as(x_arg)
         partial_count = M * num_blocks
         _dw = torch.empty((partial_count, C), dtype=torch.float32, device=w.device)
-        _db = torch.empty((partial_count, C), dtype=torch.float32, device=w.device)
+        _db = torch.empty((partial_count, C), dtype=torch.float32, device=w.device) if has_bias else _dw
 
         bwd_kernel = _rms_norm_2d_bwd_dx_fused[(M * num_blocks,)]
-        bwd_kernel(
-            dx_arg,
-            dy_arg,
-            _dw,
-            _db,
-            x_arg,
-            w,
-            rrms,
-            M,
-            C,
-            N,
-            dx_arg.stride(0),
-            dx_arg.stride(1),
-            dx_arg.stride(2),
-            dy_arg.stride(0),
-            dy_arg.stride(1),
-            dy_arg.stride(2),
-            x_arg.stride(0),
-            x_arg.stride(1),
-            x_arg.stride(2),
-            rrms.stride(0),
-            rrms.stride(1),
-            num_blocks,
-            BLOCK_SIZE=ctx.BLOCK_SIZE,
-            num_warps=ctx.num_warps,  # type: ignore
-        )
+        if has_bias:
+            bwd_kernel(
+                dx_arg,
+                dy_arg,
+                _dw,
+                _db,
+                x_arg,
+                w,
+                rrms,
+                M,
+                C,
+                N,
+                dx_arg.stride(0),
+                dx_arg.stride(1),
+                dx_arg.stride(2),
+                dy_arg.stride(0),
+                dy_arg.stride(1),
+                dy_arg.stride(2),
+                x_arg.stride(0),
+                x_arg.stride(1),
+                x_arg.stride(2),
+                rrms.stride(0),
+                rrms.stride(1),
+                num_blocks,
+                HAS_BIAS=True,  # type: ignore
+                BLOCK_SIZE=ctx.BLOCK_SIZE,
+                num_warps=ctx.num_warps,  # type: ignore
+            )
+        else:
+            bwd_kernel(
+                dx_arg,
+                dy_arg,
+                _dw,
+                _db,
+                x_arg,
+                w,
+                rrms,
+                M,
+                C,
+                N,
+                dx_arg.stride(0),
+                dx_arg.stride(1),
+                dx_arg.stride(2),
+                dy_arg.stride(0),
+                dy_arg.stride(1),
+                dy_arg.stride(2),
+                x_arg.stride(0),
+                x_arg.stride(1),
+                x_arg.stride(2),
+                rrms.stride(0),
+                rrms.stride(1),
+                num_blocks,
+                HAS_BIAS=False,  # type: ignore
+                BLOCK_SIZE=ctx.BLOCK_SIZE,
+                num_warps=ctx.num_warps,  # type: ignore
+            )
         dw = _dw.sum(dim=0).to(w.dtype)
-        db = _db.sum(dim=0).to(w.dtype)
+        db = _db.sum(dim=0).to(w.dtype) if has_bias else None
         return dx, dw, db, None

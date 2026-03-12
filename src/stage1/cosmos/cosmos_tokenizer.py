@@ -5,7 +5,7 @@ from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional, no_type_check
+from typing import Any, Optional, get_args, no_type_check
 
 import accelerate
 import numpy as np
@@ -15,14 +15,16 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from torch import Tensor, nn
 from typing_extensions import Annotated
+from timm.layers.weight_init import lecun_normal_
 
 # Blocks
 import src.stage1.cosmos.modules.blocks as cosmos_block
 from src.stage1.cosmos.inference.utils import load_jit_model_shape_matched
 from src.stage1.cosmos.modules.layers2d import Decoder, Encoder, GenerativeDecoder
-from src.stage1.cosmos.modules.blocks import block_basic_init
+from src.stage1.cosmos.modules.blocks import AdaptiveConvMode, block_basic_init
 from src.stage1.cosmos.modules.proj import build_mlp
 from src.stage1.cosmos.modules.utils import Normalize
+from src.stage1.cosmos.modules.efficience.qat import apply_tokenizer_pt2e_qat
 
 # Quantizers
 from src.stage1.discretization.collections import FSQ
@@ -38,6 +40,7 @@ from src.stage1.discretization.collections.psd import PowerSphericalDistribution
 from src.utilities.config_utils import (
     dataclass_from_dict,
     function_config_to_basic_types,
+    to_easydict_recursive,
 )
 from src.utilities.config_utils.to_dataclass import dataclass_from_dict_config
 from src.utilities.logging import catch_any
@@ -45,14 +48,37 @@ from src.utilities.network_utils import load_weights_with_shape_check
 
 from ..utilities.losses.latent_reg import (
     NestChannelDrop,
-    lmr_apply,
     LatentMaskConfig,
     ChannelDropConfig,
+    lmr_apply,
     _sample_t_distributional,
 )
 
 
 #  --- Network utilities --- #
+
+
+def _init_quant_convs(m: nn.Module, init_type: str = "uniform", init_kwargs: dict | None = None):
+    from timm.layers import RmsNorm, RmsNorm2d
+
+    init_kwargs = init_kwargs or {}
+    for m in m.modules():
+        if isinstance(m, nn.Conv2d):
+            if init_type == "uniform":
+                nn.init.xavier_uniform_(m.weight, gain=1.0)
+            elif init_type == "lecun_normal":
+                lecun_normal_(m.weight)
+            elif init_type == "trunc_normal":
+                nn.init.trunc_normal_(m.weight, **init_kwargs)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, (nn.LayerNorm, nn.RMSNorm, RmsNorm, RmsNorm2d)):
+            nn.init.ones_(m.weight)
+            if hasattr(m, "bias") and m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+
+# ----------- Sequentials ------------ #
 
 
 class MultiInputSequential(nn.Sequential):
@@ -165,7 +191,7 @@ class EncoderDecoderConfig:
     attn_type: str = "none"  # 'attn_vanilla' or 'none'
 
     # if block_name != 'moe', does not use
-    hidden_factor: int = 2
+    hidden_factor: int = 4
     moe_n_experts: int = 4
     moe_n_selected: int = 1
     moe_n_shared_experts: int = 1
@@ -180,16 +206,45 @@ class EncoderDecoderConfig:
     resample_norm_keep: bool = False
 
     # adaptive conv
-    adaptive_mode: str = "interp"
+    adaptive_mode: Any = "interp"
     adaptive_conv_kwargs: Any = field(
-        default_factory=lambda: {"router_condition": "per_channel_dw_pool", "router_dw_kernel_size": 3}
+        default_factory=lambda: {
+            "router_condition": "per_channel_dw_pool",
+            "router_dw_kernel_size": 3,
+            "cross_attn_pool_size": 4,
+            "cross_attn_embed_dim": 128,
+        }
     )
+    adaptive_input_mode: Any = None
+    adaptive_output_mode: Any = None
+    adaptive_input_conv_kwargs: Any = None
+    adaptive_output_conv_kwargs: Any = None
 
     # generative decoder specific
     per_layer_noise: bool = False
 
     def __post_init__(self):
-        assert self.adaptive_mode in ("interp", "slice", "mix"), f"Invalid adaptive_mode: {self.adaptive_mode}"
+        valid_adaptive_modes = [
+            "slice",
+            "interp",
+            "interp_proj",
+            "mix",
+            "sitok",
+            "sitok_film",
+            "sitok_pointwise",
+            "cross_attn",
+        ]
+        assert self.adaptive_mode in valid_adaptive_modes, (
+            f"Invalid adaptive_mode: {self.adaptive_mode}, should be in {valid_adaptive_modes}"
+        )
+        if self.adaptive_input_mode is not None:
+            assert self.adaptive_input_mode in valid_adaptive_modes, (
+                f"Invalid adaptive_input_mode: {self.adaptive_input_mode}"
+            )
+        if self.adaptive_output_mode is not None:
+            assert self.adaptive_output_mode in valid_adaptive_modes, (
+                f"Invalid adaptive_output_mode: {self.adaptive_output_mode}"
+            )
 
 
 @dataclass
@@ -200,13 +255,19 @@ class ContinuousTokenizerConfig:
     hook_module: str = "decoder.decoder.mid.block_2"
     vf_on_z_or_module: str = "module"
     dino_feature_dim: int = 1024
+    dual_latent_branch: bool = False
 
     # quantizer related
     quantizer_type: Optional[str] = None  # "kl", "bsq", "fsq", "multiscale_bsq", "multiscale_leechq", None
     random_quant: float = 0.0
     random_quant_per_sample: bool = True
-    dual_latent_branch: bool = False
     continuous_latent_channels: int | None = None
+
+    # bsq related
+    bsq_flip_prob: float = 0.0
+    bsq_group_size: int = 1
+
+    # fsq realted
     fsq_num_codebooks: int = 6
     fsq_levels: list[int] = field(default_factory=lambda: [8, 8, 8, 5, 5, 5])
 
@@ -248,6 +309,11 @@ class ContinuousTokenizerConfig:
 
     # pretrained task
     pretrained_type: Any = None
+
+    # quantize the model to Int8
+    quantize_to_int8: bool = False
+    qat_quantize_type: str = "pt2e_qat_prepare"
+    qat_ignore_layer_names: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         assert self.quantizer_type in ("lfq", "kl", "bsq", "fsq", "multiscale_bsq", "multiscale_leechq", None)
@@ -294,7 +360,12 @@ class ContinuousImageTokenizer(nn.Module):
     z: torch.Tensor | list[torch.Tensor] | None = None
     supported_cached_hiddens: list[str] = ["h"]
 
-    def __init__(self, cfg: ContinuousTokenizerConfig, build_enc_dec_kwargs: dict = {}):
+    def __init__(
+        self,
+        cfg: ContinuousTokenizerConfig | DictConfig,
+        enc_cfg: EncoderDecoderConfig | DictConfig | None = None,
+        dec_cfg: EncoderDecoderConfig | DictConfig | None = None,
+    ):
         super().__init__()
         self._use_repa_loss = cfg.use_repa_loss
         self._use_vf_loss = cfg.use_vf_loss
@@ -315,7 +386,7 @@ class ContinuousImageTokenizer(nn.Module):
         self._build_feature_align_mlp()
 
         # 2. FSDP wrapper module
-        if len(model_cfg.attn_resolutions) == 0:
+        if len(model_cfg.attn_resolutions) == 0 and "AttnBlock" in self._no_split_modules:
             self._no_split_modules.remove("AttnBlock")
 
         # 3. Quantizer
@@ -370,7 +441,7 @@ class ContinuousImageTokenizer(nn.Module):
 
         # encoder and decoder
         # not combine the encoder, for FSDP wrap
-        encoder, decoder = self._build_encoder_decoder(cfg, model_cfg, **build_enc_dec_kwargs)
+        encoder, decoder = self._build_encoder_decoder(cfg, model_cfg, enc_cfg, dec_cfg)
         quant_conv, post_quant_conv = self._build_pre_post_quant_convs(cfg)
         self.encoder = self.encoder_jit(encoder, quant_conv)
         self.decoder = self.decoder_jit(decoder, post_quant_conv)
@@ -440,22 +511,23 @@ class ContinuousImageTokenizer(nn.Module):
         if cfg.pretrained_type == "ijepa":
             self._build_lejepa_projector(cfg)
 
-    def _build_encoder_decoder(
-        self,
-        cfg: ContinuousTokenizerConfig,
-        model_cfg: EncoderDecoderConfig,
-        **build_enc_dec_kwargs,
-    ):
+    def _build_encoder_decoder(self, cfg, model_cfg, enc_cfg, dec_cfg):
         self._is_diffbands = isinstance(model_cfg.in_channels, (tuple, list))
 
-        model_kwargs = asdict(model_cfg)
-        encoder = Encoder(**model_kwargs)
+        # encoder
+        enc_kwargs = to_easydict_recursive(model_cfg if enc_cfg is None else enc_cfg)
+        encoder = Encoder(**enc_kwargs)
+        logger.info(f"Create enc_kwargs: {enc_kwargs}")
+
+        # decoder
+        dec_kwargs = to_easydict_recursive(model_cfg if dec_cfg is None else dec_cfg)
         if cfg.decoder_type == "default":
-            decoder = Decoder(**model_kwargs)
+            decoder = Decoder(**dec_kwargs)
         elif cfg.decoder_type == "generative":
-            decoder = GenerativeDecoder(**model_kwargs)
+            decoder = GenerativeDecoder(**dec_kwargs)
         else:
             raise ValueError(f"Unknown decoder type: {cfg.decoder_type}")
+        logger.info(f"Create dec_kwargs: {dec_kwargs}")
 
         logger.info(f"[CNN tokenizer]: Build encoder and {cfg.decoder_type} decoder.")
         return encoder, decoder
@@ -477,7 +549,8 @@ class ContinuousImageTokenizer(nn.Module):
                 l2_norm=True,
                 input_format="bchw",
                 persample_entropy_compute="analytical",
-                group_size=1,  # group_size must affect the GPU mem (compared with LFQ), f8z36g36
+                group_size=cfg.bsq_group_size,  # group_size will affect the GPU mem (compared with LFQ), f8z36g36
+                flip_bit_prob=cfg.bsq_flip_prob,  # randomly flip the bits
             )
         elif self.quantizer_type == "fsq":
             self.quantizer = FSQ(
@@ -517,7 +590,7 @@ class ContinuousImageTokenizer(nn.Module):
     def _build_pre_post_quant_convs(self, cfg: ContinuousTokenizerConfig):
         model_cfg = self.model_cfg
         q_conv_chan = model_cfg.latent_channels
-        _quant_conv_init_kwargs = dict(std=0.01, a=-1.2, b=1.2)
+        _quant_conv_init_kwargs = dict(std=0.02, a=-1.2, b=1.2)
 
         if cfg.quantizer_type == "kl":
             q_conv_chan = q_conv_chan * 2
@@ -535,22 +608,14 @@ class ContinuousImageTokenizer(nn.Module):
                 Normalize(model_cfg.z_channels, norm_type=cfg.model.norm_type),  # type: ignore
                 torch.nn.Conv2d(model_cfg.z_channels, q_conv_chan, 1),
             )
-            nn.init.ones_(quant_conv[0].weight)
-            nn.init.zeros_(quant_conv[0].bias)
-            nn.init.trunc_normal_(quant_conv[1].weight, **_quant_conv_init_kwargs)
-            nn.init.zeros_(quant_conv[1].bias)
         else:
             quant_conv = torch.nn.Conv2d(model_cfg.z_channels, q_conv_chan, 1)
-            nn.init.trunc_normal_(quant_conv.weight, **_quant_conv_init_kwargs)
-            nn.init.zeros_(quant_conv.bias)
+        _init_quant_convs(quant_conv, init_kwargs=_quant_conv_init_kwargs, init_type="trunc_normal")
 
         # then the quantizer will output the latent_channels h
         post_quant_conv = torch.nn.Conv2d(model_cfg.latent_channels, model_cfg.z_channels, 1)
-        nn.init.trunc_normal_(post_quant_conv.weight, std=0.01)
-        nn.init.zeros_(post_quant_conv.bias)
+        _init_quant_convs(post_quant_conv, init_kwargs=_quant_conv_init_kwargs, init_type="trunc_normal")
 
-        # post_quant_conv.apply(block_basic_init)
-        # quant_conv.apply(block_basic_init)
         logger.debug(f"[Tokenizer]: Built quant_conv/post_quant_conv and init them")
 
         return quant_conv, post_quant_conv
@@ -558,27 +623,21 @@ class ContinuousImageTokenizer(nn.Module):
     def _build_continuous_pre_post_quant_convs(self, cfg: ContinuousTokenizerConfig):
         model_cfg = self.model_cfg
         cont_latent_channels = self.continuous_latent_channels
-        _quant_conv_init_kwargs = dict(std=0.01, a=-1.2, b=1.2)
+        _quant_conv_init_kwargs = dict(std=0.02, a=-1.2, b=1.2)
 
         if self.norm_in_quant_conv:
             cont_quant_conv = nn.Sequential(
                 Normalize(model_cfg.z_channels, norm_type=cfg.model.norm_type),  # type: ignore
                 torch.nn.Conv2d(model_cfg.z_channels, cont_latent_channels, 1),
             )
-            nn.init.ones_(cont_quant_conv[0].weight)
-            nn.init.zeros_(cont_quant_conv[0].bias)
-            nn.init.trunc_normal_(cont_quant_conv[1].weight, **_quant_conv_init_kwargs)
-            nn.init.zeros_(cont_quant_conv[1].bias)
         else:
             cont_quant_conv = torch.nn.Conv2d(model_cfg.z_channels, cont_latent_channels, 1)
-            nn.init.trunc_normal_(cont_quant_conv.weight, **_quant_conv_init_kwargs)
-            nn.init.zeros_(cont_quant_conv.bias)
+        _init_quant_convs(cont_quant_conv, init_kwargs=_quant_conv_init_kwargs, init_type="trunc_normal")
 
         cont_post_quant_conv = torch.nn.Conv2d(cont_latent_channels, model_cfg.z_channels, 1)
-        nn.init.trunc_normal_(cont_post_quant_conv.weight, std=0.01)
-        nn.init.zeros_(cont_post_quant_conv.bias)
-        logger.debug("[Tokenizer]: Built continuous quant_conv/post_quant_conv and init them")
+        _init_quant_convs(cont_post_quant_conv, init_kwargs=_quant_conv_init_kwargs, init_type="trunc_normal")
 
+        logger.debug("[Tokenizer]: Built continuous quant_conv/post_quant_conv and init them")
         return cont_quant_conv, cont_post_quant_conv
 
     def _build_lejepa_projector(self, cfg: ContinuousTokenizerConfig):
@@ -844,7 +903,7 @@ class ContinuousImageTokenizer(nn.Module):
     def _quantizer_kept_mask(self, h: Tensor, use_quantizer: bool | None = None) -> Tensor:
         bs = h.shape[0]
         if self.quantizer_type is None:
-            return torch.zeros(bs, device=h.device, dtype=torch.bool)
+            return torch.zeros(bs, device=h.device, dtype=torch.bool)  # only use continuous latent
 
         if use_quantizer is not None:
             return torch.full((bs,), bool(use_quantizer), device=h.device, dtype=torch.bool)
@@ -856,7 +915,7 @@ class ContinuousImageTokenizer(nn.Module):
             # Per-sample quantizer keep mask.
             return torch.rand(bs, device=h.device) < self.random_quant
 
-        return torch.ones(bs, device=h.device, dtype=torch.bool)
+        return torch.ones(bs, device=h.device, dtype=torch.bool)  # only use quantized latent
 
     def _get_cont_quant_conv(self) -> nn.Module:
         cont_quant_conv = getattr(self.encoder, "cont_quant_conv", None)
@@ -882,11 +941,11 @@ class ContinuousImageTokenizer(nn.Module):
         latent_cont: Tensor | None,
         quant_keep_mask: Tensor,
     ) -> Tensor:
-        if quant_keep_mask.all():
+        if quant_keep_mask.all() or latent_cont is None:
             assert latent_quant is not None, "quant latent should not be None when all samples use quantizer"
             return self._get_post_quant_conv()(latent_quant)
 
-        if (~quant_keep_mask).all():
+        if (~quant_keep_mask).all() or latent_quant is None:
             assert latent_cont is not None, "continuous latent should not be None when all samples skip quantizer"
             return self._get_cont_post_quant_conv()(latent_cont)
 
@@ -900,6 +959,24 @@ class ContinuousImageTokenizer(nn.Module):
         mask = quant_keep_mask.view(-1, 1, 1, 1)
 
         return torch.where(mask, z_quant, z_cont)
+
+    def _kl_posterior_from_params(self, h: Tensor) -> tuple[DiagonalGaussianDistribution, Tensor, Tensor]:
+        if self.quantizer_type != "kl":
+            raise RuntimeError(f"_kl_posterior_from_params only supports KL latent, got {self.quantizer_type}")
+        assert self.quantizer is not None, "quantizer should not be None for KL latent"
+        mean, logvar = h.float().chunk(2, dim=1)
+        posterior = self.quantizer((mean, logvar))
+        return posterior, mean, logvar
+
+    def _get_kl_latent_info(self, h_pre_quant: Tensor, latent_dtype: torch.dtype) -> dict[str, Tensor]:
+        _, mean, logvar = self._kl_posterior_from_params(h_pre_quant)
+        mean = mean.to(latent_dtype)
+        logvar = logvar.to(latent_dtype)
+        return {
+            "latent_mean": mean,
+            "latent_logvar": logvar,
+            "latent_mode": mean,
+        }
 
     def _has_quantizer_applied_fn(self, h):
         """
@@ -920,11 +997,10 @@ class ContinuousImageTokenizer(nn.Module):
             res = hq.to(h_dtype), bsq_loss, loss_breakdown
 
         elif self.quantizer_type == "kl":
-            m_, logvar_ = h.chunk(2, dim=1)
-            posterior = self.quantizer((m_, logvar_))
+            posterior, m_, logvar_ = self._kl_posterior_from_params(h)
             kl_loss = posterior.kl()
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
-            h = posterior.sample()
+            h = posterior.sample() if self.training else posterior.mode()
             loss_breakdown = edict(posterior=posterior, mean=m_, logvar=logvar_)
 
             if self.use_channel_drop:
@@ -987,6 +1063,9 @@ class ContinuousImageTokenizer(nn.Module):
     def apply_quantizer(self, h: Tensor, use_quantizer: bool | None = None, **kwargs):
         keep_mask = self._quantizer_kept_mask(h, use_quantizer=use_quantizer)
         if not keep_mask.any():
+            if self.quantizer_type == "kl":
+                posterior, _, _ = self._kl_posterior_from_params(h)
+                return posterior.mode().to(h.dtype)
             return h
 
         quant_ret = self._has_quantizer_applied_fn(h)
@@ -1031,12 +1110,12 @@ class ContinuousImageTokenizer(nn.Module):
         self,
         z: Tensor,
         use_quantizer: bool | None = None,
-        *,
         h_pre_quant: Tensor | None = None,
     ) -> edict:
         if h_pre_quant is None:
             h_pre_quant = self.encoder.quant_conv(z)
 
+        # Normal: only one latent branch, quantized or continuous
         if not self.dual_latent_branch:
             maybe_q_ret = self.apply_quantizer(h_pre_quant, use_quantizer)
             if isinstance(maybe_q_ret, tuple):
@@ -1046,13 +1125,18 @@ class ContinuousImageTokenizer(nn.Module):
                 q_loss = None
                 loss_breakdown = None
             h = self.latent_aug(h)
-            return edict(
+            branch_out = edict(
                 latent=h,
                 latent_is_dual=False,
                 q_loss=q_loss,
                 q_loss_breakdown=loss_breakdown,
             )
+            if self.quantizer_type == "kl":
+                branch_out.update(self._get_kl_latent_info(h_pre_quant, h.dtype))
+            return branch_out
 
+        # Otherwise: two latent paths
+        # mix two types of latents
         quant_keep_mask = self._quantizer_kept_mask(h_pre_quant, use_quantizer=use_quantizer)
         use_quant_path = bool(quant_keep_mask.any().item())
         use_cont_path = bool((~quant_keep_mask).any().item())
@@ -1134,8 +1218,22 @@ class ContinuousImageTokenizer(nn.Module):
         return h_proj
 
     def encode(self, x: Tensor, use_quantizer: bool | None = None):
+        """
+        Encode image into latent.
+
+        Args:
+            x: tensor, image
+            use_quantizer: bool | None, default is None,
+                if False, will not apply quantizer at one-latent path; At dual-latent path, `quant_keep_mask` will be
+                all-zero, which means quantized latent will not be used to mix the continous latent. The latent sent
+                to the decoder will only be continuous latent.
+
+                if True, the quantizer will be applied at one-latent path; At dual-latent path, the latent sent to
+                the decoder will be mixed with both quantized and continuous latents in some probility.
+
+                if None, see it as True when has any quantizer, or False otherwise.
+        """
         enc_out = edict(latent=None, q_loss=None, q_loss_breakdown=None, latent_is_dual=False)
-        # x = self._maybe_channels_last_4d(x)
 
         need_repa_cache = self.training and (hasattr(self, "_repa_proj") or hasattr(self, "_vf_proj"))
         interms: list[Tensor] | None = None
@@ -1148,11 +1246,9 @@ class ContinuousImageTokenizer(nn.Module):
             z, interms = self.encoder.encoder(x, ret_interm_feats=repa_layers)
             self.z = interms
             # To latent (before quantizer)
-            # h_pre_quant = self._maybe_channels_last_4d(self.encoder.quant_conv(z))
             h_pre_quant = self.encoder.quant_conv(z)
         else:
             z = self.encoder.encoder(x)
-            # h_pre_quant = self._maybe_channels_last_4d(self.encoder.quant_conv(z))
             h_pre_quant = self.encoder.quant_conv(z)
             self.z = h_pre_quant
 
@@ -1171,9 +1267,25 @@ class ContinuousImageTokenizer(nn.Module):
         Decoder forward method. Outputs contain
         recon, latent, q_loss, q_loss_breakdown, loss_breakdown
 
-        inp: Encoded output dict or generated latent.
-        inp_shape: torch.Size or int of channels.
-        clamp: Clamp decoded values to (-1, 1).
+        Args:
+            inp: Encoded output dict or generated latent. If it is a dict, it has keys:
+                    latent: quantized or continous latent
+                    latent_quant: quantized latent
+                    latent_cont: continuous latent
+                    quant_keep_mask: mask for mixture
+                    latent_is_dual: bool
+                    q_loss: quantizer's total loss
+                    q_loss_breakdown: quantizer's loss parts
+            inp_shape: torch.Size or int of channels.
+            clamp: Clamp decoded values to (-1, 1).
+
+        Outputs:
+            dec_out: dict, it has keys:
+                Optional from `inp` and additional keys:
+                recon: decoded image
+                decoder_z: mixed z
+                latent: quantized or continous latent
+                latent_mixed: mixed latent or alias for latent
         """
         dec_out = edict(**inp) if isinstance(inp, dict) else edict(latent=inp)  # type: ignore
 
@@ -1193,7 +1305,6 @@ class ContinuousImageTokenizer(nn.Module):
             dec_out["latent"] = z_dec
             dec_out["latent_mixed"] = z_dec
         else:
-            # h = self._maybe_channels_last_4d(dec_out["latent"])
             dec = self.decoder(dec_out["latent"], chan)  # [b, c, h, w]
 
         # Clamp
@@ -1523,20 +1634,50 @@ class ContinuousImageTokenizer(nn.Module):
     ############ Create model #########
 
     @classmethod
-    def create_model(cls, config: DictConfig | None = None, **kwargs):
-        if config is not None:
-            cfg = dataclass_from_dict_config(ContinuousTokenizerConfig, config, strict=False)
-        else:
-            cfg = dataclass_from_dict(ContinuousTokenizerConfig, kwargs, strict=False)
-        if hasattr(cfg, "__post_init__"):
-            cfg.__post_init__()  # check the configs
-        return cls(cfg)
+    def create_model(
+        cls,
+        cfg,
+        enc_cfg=None,
+        dec_cfg=None,
+    ):
+        # main cfg
+        cfg = OmegaConf.create(cfg)
+
+        # encoder and decoder specifics configs
+        enc_cfg = OmegaConf.merge(cfg.model, enc_cfg) if enc_cfg is not None else None  # ty: ignore
+        dec_cfg = OmegaConf.merge(cfg.model, dec_cfg) if dec_cfg is not None else None  # ty: ignore
+
+        # to dataclass, fill default values
+        cfg = dataclass_from_dict_config(ContinuousTokenizerConfig, cfg)
+        enc_cfg = dataclass_from_dict_config(EncoderDecoderConfig, enc_cfg) if enc_cfg is not None else None
+        dec_cfg = dataclass_from_dict_config(EncoderDecoderConfig, dec_cfg) if dec_cfg is not None else None
+
+        model = cls(cfg, enc_cfg, dec_cfg)
+        if cfg.quantize_to_int8:
+            logger.warning(f"Casting encoder into Int8 quantization for QAT.")
+            model = cls.quantization_aware_training_model(
+                model,
+                quantize_type=cfg.qat_quantize_type,
+                ignore_layer_names=cfg.qat_ignore_layer_names,
+            )
+
+        return model
 
     def set_grad_checkpointing(self, enabled: bool = True):
         for m in self.modules():
             if hasattr(m, "grad_checkpointing"):
                 m.grad_checkpointing = enabled
                 logger.info(f"set grad_checkpointing={enabled} for {m.__class__.__name__}")
+
+    ########## Deploy model utils ###########
+    @staticmethod
+    def quantization_aware_training_model(
+        model: "ContinuousImageTokenizer | nn.Module",
+        quantize_type: str,
+        ignore_layer_names: list[str],
+        example_inputs: tuple[torch.Tensor, ...] | None = None,
+    ):
+        return apply_tokenizer_pt2e_qat(model, quantize_type, ignore_layer_names, example_inputs)
 
 
 ##### Configs #######
@@ -1553,39 +1694,40 @@ def vae_f8_config(
     pretrained_path: str = "",
 ):
     cfg: dict[str, Any] = {
-        "model": {
-            "attn_resolutions": [32],
-            "channels": 128,
-            "channels_mult": [2, 4, 4],
-            "dropout": 0.0,
-            "in_channels": in_chans,
-            "out_channels": in_chans,
-            "z_channels": z_chans,
-            "latent_channels": latent_chans,
-            "spatial_compression": vae_factor,
-            "patch_size": patch_size,
-            "num_res_blocks": 2,
-            "resolution": 1024,
-            "patch_method": "haar",
-            "act_checkpoint": True,
-            "block_name": "res_block",  # res_block, res_moe, swin_block
-            "padding_mode": "reflect",
-            # "norm_type": "rmsnorm2d",
-            "norm_type": "gn",
-            "norm_groups": 32,
-            "attn_type": "none",
-            "adaptive_mode": "interp",
-        },
-        "uni_path": pretrained_path,
-        "loading_type": "pretrained" if Path(pretrained_path).exists() else None,
-        "quantizer_type": quantizer_type,
-        # repa
-        "hook_for_repa": False,
-        "use_repa_loss": use_repa_loss,
-        "use_vf_loss": False,
-        "vf_on_z_or_module": "z",
-        "dino_feature_dim": 1024,
-        "z_factor": 1,
+        "cfg": {
+            "model": {
+                "attn_resolutions": [32],
+                "channels": 128,
+                "channels_mult": [2, 4, 4],
+                "dropout": 0.0,
+                "in_channels": in_chans,
+                "out_channels": in_chans,
+                "z_channels": z_chans,
+                "latent_channels": latent_chans,
+                "spatial_compression": vae_factor,
+                "patch_size": patch_size,
+                "num_res_blocks": 2,
+                "resolution": 1024,
+                "patch_method": "haar",
+                "act_checkpoint": True,
+                "block_name": "res_block",  # res_block, res_moe, swin_block
+                "padding_mode": "reflect",
+                # "norm_type": "rmsnorm2d",
+                "norm_type": "gn",
+                "norm_groups": 32,
+                "attn_type": "none",
+                "adaptive_mode": "interp",
+            },
+            "uni_path": pretrained_path,
+            "loading_type": "pretrained" if Path(pretrained_path).exists() else None,
+            "quantizer_type": quantizer_type,
+            # repa
+            "use_repa_loss": use_repa_loss,
+            "use_vf_loss": False,
+            "vf_on_z_or_module": "z",
+            "dino_feature_dim": 1024,
+            "z_factor": 1,
+        }
     }
 
     cfg = OmegaConf.create(cfg)
@@ -1610,7 +1752,8 @@ def vae_f16_config(
         use_repa_loss=use_repa_loss,
         pretrained_path=pretrained_path,
     )
-    cfg.model.channels_mult = [2, 2, 4, 4]
+    cfg.cfg.model.channels_mult = [2, 2, 4, 4]
+    return cfg
 
 
 # * --- test --- * #
@@ -1659,14 +1802,32 @@ def test_tokenizer_forward_backward(
     from src.utilities.metrics.aggregation import StackMeanMetrics
     from src.utilities.network_utils import load_peft_model_checkpoint, mem_context
 
-    config = vae_f8_config(512, 64, quantizer_type="bsq", pretrained_path=base_model_ckpt)
+    config = vae_f8_config(
+        512,
+        64,
+        quantizer_type="bsq",
+        pretrained_path=base_model_ckpt,
+    )
+
+    # add swin
+    dec_cfg = OmegaConf.create(
+        dict(
+            swin_replace_levels=[1, 2],
+            swin_replace_mid=True,
+            swin_num_heads=16,
+            swin_window_size=8,
+            swin_shift_size=4,
+            num_res_blocks=6,
+        )
+    )
+
     if other_model_kwargs:
         if "model" in other_model_kwargs:
             config["model"].update(other_model_kwargs.pop("model"))
         else:
             config.update(other_model_kwargs)
 
-    tokenizer = model_cls.create_model(**config)
+    tokenizer = model_cls.create_model(dec_cfg=dec_cfg, **config)
     tokenizer = tokenizer.to(device, dtype)
 
     is_lora = lora_ckpt is not None
@@ -1898,18 +2059,18 @@ def test_tokenizer_forward_backward(
 
 if __name__ == "__main__":
     """
-    CUDA_VISIBLE_DEVICES=1 MODEL_COMPILED=0 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_tokenizer
+    CUDA_VISIBLE_DEVICES=0 MODEL_COMPILED=0 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_tokenizer
     """
     # Test lora
     test_tokenizer_forward_backward(
         # base_model_ckpt="runs/stage1_cosmos_nested/2025-12-21_02-01-17_cosmos_f8c16p1_litdata_one_loader_irepa-spatial-norm_noisy_latent_aug/ema/tokenizer/model.safetensors",
         # lora_ckpt="runs/stage1_cosmos_nested_lora/2026-02-20_19-00-12_cosmos_lora=lora_r=32_f8c16p1_hsigene/peft_ckpt/hsigene",
-        base_model_ckpt="runs/pretrained/cosmos_f8c64_bsq/ema/tokenizer/model.safetensors",
+        # base_model_ckpt="runs/pretrained/cosmos_f8c64_bsq/ema/tokenizer/model.safetensors",
         save_pca_vis=False,
         pca_type="z",
         real_data="SAM270k",
-        # save_img_dir='tmp/hsi_gene_recon',  # "tmp/vis_pansharpening_loras",
-        rgb_chans=[20, 12, 4],  # [49, 39, 29],  # RGB
+        save_img_dir="tmp/fmow_MS_bsq_recon",  # "tmp/vis_pansharpening_loras",
+        rgb_chans=[2, 1, 0],  # [49, 39, 29],  # RGB
         dtype=torch.bfloat16,
         upscale=1,
         max_iters=100,
@@ -1917,4 +2078,5 @@ if __name__ == "__main__":
         use_optim=False,
         check_grad=False,
         device="cuda",
+        count_params=True,
     )

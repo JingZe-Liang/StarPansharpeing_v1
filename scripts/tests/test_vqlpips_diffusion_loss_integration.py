@@ -64,9 +64,9 @@ def test_vqlpips_diffusion_loss_included_in_gen_loss(monkeypatch: pytest.MonkeyP
         ssim_weight=0.0,
         diffusion_loss_weight=3.0,
         diffusion_loss_options={
-            "model_type": "x1",
-            "path_type": "linear",
-            "loss_type": "none",
+            "lambda0": 5.0,
+            "end_logsnr": -15.0,
+            "schedule": "linear_logsnr_vp",
         },
     )
 
@@ -87,3 +87,33 @@ def test_vqlpips_diffusion_loss_included_in_gen_loss(monkeypatch: pytest.MonkeyP
     assert "gen_loss" in losses
     assert "diffusion_loss" in logs
     assert torch.isclose(logs["diffusion_loss"], torch.tensor(6.0))
+
+
+def test_vqlpips_diffusion_loss_waits_for_its_own_start_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gan_loss_module, "DiffusionLoss", _DummyDiffusionLoss)
+
+    loss_fn = VQLPIPSWithDiscriminator(
+        disc_network_type="none",
+        disc_weight=0.0,
+        diffusion_start_for_g=10,
+        perceptual_weight=0.0,
+        quantizer_type=None,
+        ssim_weight=0.0,
+        diffusion_loss_weight=3.0,
+        diffusion_loss_options={
+            "lambda0": 5.0,
+            "end_logsnr": -15.0,
+            "schedule": "linear_logsnr_vp",
+        },
+    )
+
+    losses, logs = loss_fn(
+        inputs=torch.zeros(2, 3, 8, 8),
+        reconstructions=torch.zeros(2, 3, 8, 8),
+        optimizer_idx=0,
+        global_step=5,
+    )
+
+    assert "gen_loss" in losses
+    assert "diffusion_loss" in logs
+    assert torch.isclose(logs["diffusion_loss"], torch.tensor(0.0))

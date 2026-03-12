@@ -34,6 +34,7 @@ cnn_cfg:
   quantizer_type: bsq
   random_quant: 0.5
   random_quant_per_sample: true
+  bsq_flip_prob: 0.1
   dual_latent_branch: true
   continuous_latent_channels: 32
   vf_on_z_or_module: z
@@ -59,8 +60,6 @@ trans_enc_cfg:
   reg_tokens: 4
   compile_model: false
   attn_type: gated
-
-trans_dec_cfg: null
 
 distillation_cfg:
   dino_feature_dim: 1024

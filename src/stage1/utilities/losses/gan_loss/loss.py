@@ -18,7 +18,7 @@ from einops import rearrange
 from kornia.losses import SSIMLoss
 from loguru import logger
 
-from src.utilities.config_utils import function_config_to_basic_types
+from src.utilities.config_utils import function_config_to_basic_types, set_defaults
 from src.utilities.train_utils.time import time_recorder
 from src.stage1.self_supervised.lejepa_aug import SIGReg
 from src.stage1.self_supervised.generative_prior_loss.diffusion_loss import DiffusionLoss
@@ -35,6 +35,8 @@ from ..model import (
 from ..repa import LatentGramLoss, PhiSMultipleTeacherDistillLoss, REPALoss, VFLoss
 from .hyperspectral_percep_loss import LPIPSHyperpspectralLoss
 from ..latent_reg import LatentSparsityLoss, lcr_loss
+
+logger = logger.bind(_name_="VQLIPIPSLoss")
 
 
 # * --- utilities --- #
@@ -271,12 +273,22 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # REPA loss parameters
         repa_loss_weight (float | None): Weight for REPA loss. If None or 0, REPA loss is disabled. Defaults to None.
         repa_loss_options (dict): Options for REPA loss. Defaults to {}.
+        repa_start_for_g (int): Global step to start applying REPA loss in generator updates. Defaults to 0.
+
+        # Semantic distillation warmup
+        sem_distill_start_for_g (int): Global step to start applying semantic distillation loss in generator updates. Defaults to 0.
 
         # Visual Foundation loss parameters
         vf_loss_weight (float | None): Weight for Visual Foundation loss. If None or 0, VF loss is disabled. Defaults to None.
         vf_loss_options (dict): Options for VF loss. Defaults to {}.
+        vf_start_for_g (int): Global step to start applying VF loss in generator updates. Defaults to 0.
+
+        # PhiS / Diffusion warmup
+        phis_start_for_g (int): Global step to start applying PhiS loss in generator updates. Defaults to 0.
+        diffusion_start_for_g (int): Global step to start applying diffusion prior loss in generator updates. Defaults to 0.
 
         # Other losses
+        other_reg_start_for_g (int): Global step to start applying lcr/latent_sparsity/sigreg in generator updates. Defaults to 0.
         lecam_loss_weight (float | None): Weight for LeCAM regularization. Defaults to None.
         ssim_weight (float): Weight for SSIM loss. Defaults to 0.1.
 
@@ -319,6 +331,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # generator loss
         reconstruction_loss_type: Literal["l1", "mse", "dwt"] | None = "mse",
         reconstruction_weight: float = 1.0,
+        ssim_weight: float | None = None,
         # None for adaptive loss weight using the tokenizer last layer gradient
         # mul at the tokenizer G_loss
         gen_loss_weight: float | None = None,  # None means adaptive weight
@@ -327,32 +340,36 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # repa loss
         repa_loss_weight: float | None = None,
         repa_loss_options: dict = {},
+        repa_start_for_g: int = 0,
         # semantic loss
         sem_distill_weight: float | None = None,
         sem_distill_options: dict = {},
+        sem_distill_start_for_g: int = 0,
         # vf loss
         vf_loss_weight: float | None = None,
         vf_loss_options: dict = {},
+        vf_start_for_g: int = 0,
         # gram loss
         gram_loss_weight: float | None = None,
         gram_loss_options: dict = {},
         # phis loss
         phis_loss_weight: float | None = None,
         phis_loss_options: dict = {},
+        phis_start_for_g: int = 0,
         # diffusion prior loss
         diffusion_loss_weight: float | None = None,
         diffusion_loss_options: dict = {},
+        diffusion_start_for_g: int = 0,
         # other losses
         lecam_loss_weight: float | None = None,
+        # regularization losses
+        other_reg_start_for_g: int = 0,
         lcr_loss_weight: float | None = None,
         lcr_loss_options: dict = {},
         latent_sparsity_weight: float | None = None,
         latent_sparsity_options: dict = {},
-        # latent regularization loss - penalize large activation values
         latent_reg_weight: float | None = None,
         latent_reg_type: Literal["l2", "abs"] = "l2",
-        ssim_weight: float | None = None,
-        # sigreg regularization loss
         sigreg_weight: float | None = None,
         sigreg_options: dict = {"knots": 17, "rnd_proj_dim": 64},
         # if is video
@@ -407,6 +424,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.num_frames = num_frames
         self.reconstruction_loss_type = reconstruction_loss_type
         self.force_not_use_recon_loss = force_not_use_recon_loss
+        self.other_reg_iter_start_for_g = other_reg_start_for_g
         self.lcr_loss_weight = lcr_loss_weight
         self.lcr_loss_options = lcr_loss_options
         self.use_lcr = lcr_loss_weight is not None and lcr_loss_weight > 0.0
@@ -469,7 +487,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         else:
             default_quant_opts = None
         logger.info(f"[VQ fn loss]: use quantizer type={quantizer_type}")
-        self.quantizer_options = quantizer_options or default_quant_opts
+        self.quantizer_options = set_defaults(quantizer_options or {}, default_quant_opts)
+        logger.info(f"Use quantizer options: <cyan>{self.quantizer_options}</cyan>")
         self._vq_options_check()
 
         # * perceptual loss
@@ -479,13 +498,18 @@ class VQLPIPSWithDiscriminator(nn.Module):
             self.use_perceptual_loss = True
             self.perceptual_loss = LPIPSHyperpspectralLoss(**perceptual_options).to(self.device)
         self.perceptual_weight = perceptual_weight
+
         self.phis_loss_weight = phis_loss_weight
         self.use_phis = phis_loss_weight is not None and phis_loss_weight > 0
+        self.phis_iter_start_for_g = phis_start_for_g
+
         self.diffusion_loss_weight = diffusion_loss_weight
         self.use_diffusion = diffusion_loss_weight is not None and diffusion_loss_weight > 0
+        self.diffusion_iter_start_for_g = diffusion_start_for_g
 
         # * repa loss
         self.repa_loss_weight = repa_loss_weight
+        self.repa_iter_start_for_g = repa_start_for_g
         self.use_repa = False
         if self.use_phis and repa_loss_weight is not None and repa_loss_weight > 0:
             raise AssertionError("phis loss and repa loss can not be used at the same time")
@@ -500,6 +524,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * visual foundation loss
         self.vf_loss_weight = vf_loss_weight
+        self.vf_iter_start_for_g = vf_start_for_g
         self.use_vf = False
         if self.use_phis and vf_loss_weight is not None and vf_loss_weight > 0:
             raise AssertionError("phis loss and vf loss can not be used at the same time")
@@ -514,6 +539,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * semantic distillation loss
         self.sd_loss_weight = sem_distill_weight
+        self.sem_distill_iter_start_for_g = sem_distill_start_for_g
         self.use_sem_distill = False
         if sem_distill_weight is not None and sem_distill_weight > 0:
             self.use_sem_distill = True
@@ -737,11 +763,17 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         return d_weight
 
+    def _generator_warmup_weight(self, weight: float | None, global_step: int, start_step: int) -> float:
+        if weight is None:
+            return 0.0
+        return float(adopt_weight(weight, global_step, threshold=start_step))
+
     def _latent_sparsity_loss(
         self,
         latent: torch.Tensor,
         nll_loss: torch.Tensor,
         enc_last_layer: nn.Parameter | None,
+        loss_weight: float,
     ) -> torch.Tensor:
         if not self.use_latent_sparsity:
             return nll_loss.new_tensor(0.0)
@@ -755,7 +787,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         latent_sparsity_loss, _ = self.latent_sparsity_fn(latent)
         if enc_last_layer is not None:
             sparsity_weight = self._calculate_adaptive_weight(nll_loss, latent_sparsity_loss, last_layer=enc_last_layer)
-            latent_sparsity_loss = latent_sparsity_loss * sparsity_weight * self.latent_sparsity_weight
+            latent_sparsity_loss = latent_sparsity_loss * sparsity_weight * loss_weight
 
         return latent_sparsity_loss
 
@@ -1062,9 +1094,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
         return log
 
     def _reconstruction_loss(self, inputs: torch.Tensor, targets: torch.Tensor):
-        # DEBUG: print shapes to diagnose mismatch
-        # logger.error(f"[DEBUG] _reconstruction_loss - inputs.shape: {inputs.shape}, targets.shape: {targets.shape}")
-
         # recon loss
         if self.reconstruction_loss_type == "mse":
             recon_loss = F.mse_loss(inputs, targets)
@@ -1149,26 +1178,41 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * repa loss
         repa_loss = self.zero
-        if hasattr(self, "repa_loss"):
+        repa_loss_weight = self._generator_warmup_weight(
+            self.repa_loss_weight,
+            global_step,
+            self.repa_iter_start_for_g,
+        )
+        if hasattr(self, "repa_loss") and repa_loss_weight > 0.0:
             assert self.repa_loss_weight is not None
             with torch.autocast(self.device.type, dtype=self.dtype):
                 repa_loss = self.repa_loss(inputs, tokenizer_feat)
-            repa_loss = repa_loss * self.repa_loss_weight
+            repa_loss = repa_loss * repa_loss_weight
 
         # * vf loss
         vf_loss = self.zero
-        if self.use_vf:
+        vf_loss_weight = self._generator_warmup_weight(
+            self.vf_loss_weight,
+            global_step,
+            self.vf_iter_start_for_g,
+        )
+        if self.use_vf and vf_loss_weight > 0.0:
             with torch.autocast(self.device.type, dtype=self.dtype):
                 vf_loss = self.vf_loss(inputs, tokenizer_feat, nll_loss, enc_last_layer)
-            vf_loss = vf_loss * self.vf_loss_weight  # vf weight is 0.1 by default
+            vf_loss = vf_loss * vf_loss_weight
 
         # * semantic distillation loss
         sem_dist_loss = self.zero
-        if self.use_sem_distill:
+        sem_distill_weight = self._generator_warmup_weight(
+            self.sd_loss_weight,
+            global_step,
+            self.sem_distill_iter_start_for_g,
+        )
+        if self.use_sem_distill and sem_distill_weight > 0.0:
             assert tokenizer_feat2 is not None, "tokenizer_feat2 is None"
             with torch.autocast(self.device.type, dtype=self.dtype):
                 sem_dist_loss = self.sd_loss(inputs, tokenizer_feat2)
-            sem_dist_loss = sem_dist_loss * self.sd_loss_weight
+            sem_dist_loss = sem_dist_loss * sem_distill_weight
 
         # * gram loss
         if self.use_gram:
@@ -1178,16 +1222,27 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * phis loss
         phis_loss_val = self.zero
-        if self.use_phis:
+        phis_loss_weight = self._generator_warmup_weight(
+            self.phis_loss_weight,
+            global_step,
+            self.phis_iter_start_for_g,
+        )
+        if self.use_phis and phis_loss_weight > 0.0:
             assert self.phis_loss_weight is not None
             assert phis_student_feature is not None, "phis_student_feature is None"
             with torch.autocast(self.device.type, dtype=self.dtype):
                 phis_loss_val = self.phis_loss(inputs, phis_student_feature)
-            phis_loss_val = phis_loss_val * self.phis_loss_weight
+            phis_loss_val = phis_loss_val * phis_loss_weight
 
         # * diffusion prior loss
+        # `latent` is the clean compact latent regularized by the UL-style prior.
         diffusion_loss_val = self.zero
-        if self.use_diffusion:
+        diffusion_loss_weight = self._generator_warmup_weight(
+            self.diffusion_loss_weight,
+            global_step,
+            self.diffusion_iter_start_for_g,
+        )
+        if self.use_diffusion and diffusion_loss_weight > 0.0:
             assert self.diffusion_loss_weight is not None
             assert latent is not None, "latent is required when diffusion prior loss is enabled"
             assert diffusion_model is not None, "diffusion_model is required when diffusion prior loss is enabled"
@@ -1197,16 +1252,21 @@ class VQLPIPSWithDiscriminator(nn.Module):
                     model_kwargs=diffusion_model_kwargs,
                     model=diffusion_model,
                 )
-            diffusion_loss_val = diffusion_loss_val * self.diffusion_loss_weight
+            diffusion_loss_val = diffusion_loss_val * diffusion_loss_weight
 
         # * lcr loss
         lcr_loss_val = self.zero
-        if self.use_lcr:
+        lcr_loss_weight = self._generator_warmup_weight(
+            self.lcr_loss_weight,
+            global_step,
+            self.other_reg_iter_start_for_g,
+        )
+        if self.use_lcr and lcr_loss_weight > 0.0:
             assert latent is not None, "latent (h) is required for lcr_loss"
             local_corr, lcr_loss_val = lcr_loss(latent, **self.lcr_loss_options)
             if lcr_loss_val > 0:
                 lcr_weight = self._calculate_adaptive_weight(nll_loss, lcr_loss_val, last_layer=enc_last_layer)
-                lcr_loss_val = lcr_loss_val * lcr_weight * self.lcr_loss_weight
+                lcr_loss_val = lcr_loss_val * lcr_weight * lcr_loss_weight
 
         # * latent regularization loss
         # penalize large activation values in latent space
@@ -1223,25 +1283,41 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # * latent sparsity loss
         latent_sparsity_loss = self.zero
-        if self.use_latent_sparsity:
+        latent_sparsity_weight = self._generator_warmup_weight(
+            self.latent_sparsity_weight,
+            global_step,
+            self.other_reg_iter_start_for_g,
+        )
+        if self.use_latent_sparsity and latent_sparsity_weight > 0.0:
             assert latent is not None, "latent is required for latent sparsity loss"
-            latent_sparsity_loss = self._latent_sparsity_loss(latent, nll_loss, enc_last_layer)
+            latent_sparsity_loss = self._latent_sparsity_loss(
+                latent,
+                nll_loss,
+                enc_last_layer,
+                latent_sparsity_weight,
+            )
 
         # * sigreg loss
         sigreg_loss = self.zero
-        if self.use_sigreg:
+        sigreg_weight = self._generator_warmup_weight(
+            self.sigreg_weight,
+            global_step,
+            self.other_reg_iter_start_for_g,
+        )
+        if self.use_sigreg and sigreg_weight > 0.0:
             assert self.sigreg_fn is not None, f"SIGReg class should be a attribution in VQ loss class."
             assert latent is not None, "latent is required for sigreg"
             # sigreg loss on all patches
             latent_1d = rearrange(latent, "b c h w -> (b h w) c").unsqueeze(0)  # 1,BHW,C
             sigreg_loss = self.sigreg_fn(latent_1d)
-            sigreg_loss = sigreg_loss * self.sigreg_weight
+            sigreg_loss = sigreg_loss * sigreg_weight
 
         # * (un)conditional gan loss
         disc_factor = adopt_weight(self.disc_factor, global_step, threshold=self.disc_iter_start_for_g)
         d_weight = 1.0
         g_loss: torch.Tensor = self.zero  # type: ignore
         if disc_factor > 0 and self.use_disc:
+            assert self.discriminator is not None, "discriminator is None"
             with torch.autocast(device_type="cuda", dtype=self.dtype):
                 if cond is None:
                     assert not self.disc_conditional
@@ -1337,6 +1413,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
         # second pass for discriminator update
         with torch.autocast(device_type="cuda", dtype=self.dtype):
+            assert self.discriminator is not None
             if cond is None:
                 # detach that only gradients on discriminator
                 logits_real = self.discriminator(inputs)

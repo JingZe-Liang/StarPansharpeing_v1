@@ -198,7 +198,16 @@ class LayerNorm(nn.Module):
 
 
 class MultiScaleBSQ(Module):
-    """Follows Algorithm 1. in https://arxiv.org/pdf/2107.03312.pdf"""
+    """Follows Algorithm 1. in https://arxiv.org/pdf/2107.03312.pdf.
+
+    MultiScaleBSQ performs residual quantization across spatial or spatio-temporal scales.
+    This differs from ResidualLFQ, which stacks quantizers along quantizer depth at the same
+    resolution, and from GroupedResidualLFQ, which first splits the feature dimension into
+    groups and then applies residual LFQ inside each group.
+
+    The BSQ module below is only the binary quantization kernel. The multi-scale residual
+    composition and post-quantization latent flip augmentation stay at this wrapper level.
+    """
 
     def __init__(
         self,
@@ -363,7 +372,10 @@ class MultiScaleBSQ(Module):
         # residual_list = []
         # interpolate_residual_list = []
         # quantized_list = []
+        drop_lvl_start = 0
+        drop_lvl_end = 0
         if self.drop_when_test:
+            assert self.drop_lvl_idx is not None
             drop_lvl_start = self.drop_lvl_idx
             drop_lvl_end = self.drop_lvl_idx + self.drop_lvl_num
         scale_num = len(scale_schedule)
@@ -392,7 +404,10 @@ class MultiScaleBSQ(Module):
                         indices = None
                         bit_indices = None
                         loss = self.zero
-                        all_entropies.append(torch.stack([self.zero, self.zero]))
+                        zero_entropy = torch.zeros(
+                            (), device=interpolate_residual.device, dtype=interpolate_residual.dtype
+                        )
+                        all_entropies.append(torch.stack([zero_entropy, zero_entropy]))
                 elif self.drop_when_test and drop_lvl_start <= si < drop_lvl_end:
                     continue
                 else:
@@ -506,11 +521,13 @@ class BSQ(Module):
         # some assert validations
 
         assert exists(dim) or exists(codebook_size), "either dim or codebook_size must be specified for LFQ"
-        assert not exists(codebook_size) or log2(codebook_size).is_integer(), (
-            f"your codebook size must be a power of 2 for lookup free quantization (suggested {2 ** ceil(log2(codebook_size))})"
-        )
-
-        codebook_size = default(codebook_size, lambda: 2**dim)
+        if codebook_size is not None:
+            assert log2(codebook_size).is_integer(), (
+                f"your codebook size must be a power of 2 for lookup free quantization (suggested {2 ** ceil(log2(codebook_size))})"
+            )
+        else:
+            assert dim is not None
+            codebook_size = 2**dim
         self.codebook_size = codebook_size
 
         codebook_dim = int(log2(codebook_size))
@@ -570,6 +587,8 @@ class BSQ(Module):
         assert 0 < frac_per_sample_entropy <= 1.0
         self.frac_per_sample_entropy = frac_per_sample_entropy
 
+        # Legacy compatibility only. The BSQ loss is aligned to BinarySphericalQuantizer
+        # and therefore uses gamma0 / gamma / zeta directly instead of diversity_gamma.
         self.diversity_gamma = diversity_gamma
         self.entropy_loss_weight = entropy_loss_weight
 
@@ -584,7 +603,8 @@ class BSQ(Module):
         # whether to soft clamp the input value from -value to value
 
         self.soft_clamp_input_value = soft_clamp_input_value
-        assert not exists(soft_clamp_input_value) or soft_clamp_input_value >= codebook_scale
+        if soft_clamp_input_value is not None:
+            assert soft_clamp_input_value >= codebook_scale
 
         # whether to make the entropy loss positive through a softplus (experimental, please report if this worked or not in discussions)
 
@@ -677,15 +697,12 @@ class BSQ(Module):
         return z + (zhat - z).detach()
 
     def soft_entropy_loss(self, z):
+        prob = torch.sigmoid(-4 * z / (self.codebook_dims**0.5) * self.inv_temperature)
+        prob = torch.stack([prob, 1 - prob], dim=-1)  # (b, h, w, codebook_dim, 2)
         if self.persample_entropy_compute == "analytical":
-            # if self.l2_norm:
-            p = torch.sigmoid(-4 * z / (self.codebook_dims**0.5) * self.inv_temperature)
-            # else:
-            #     p = torch.sigmoid(-4 * z * self.inv_temperature)
-            prob = torch.stack([p, 1 - p], dim=-1)  # (b, h, w, 18, 2)
             per_sample_entropy = (
                 self.get_entropy(prob, dim=-1, normalize=False).sum(dim=-1).mean()
-            )  # (b,h,w,18)->(b,h,w)->scalar
+            )  # (b,h,w,codebook_dim)->(b,h,w)->scalar
         else:
             per_sample_entropy = self.get_entropy(prob, dim=-1, normalize=False).sum(dim=-1).mean()
 
@@ -753,14 +770,19 @@ class BSQ(Module):
             # calculate indices
             bit_indices = (quantized > 0).int()
             indices = (bit_indices * self.mask).sum(dim=-1)
+            zero_scalar = torch.zeros((), device=x.device, dtype=x.dtype)
             if self.training:
                 persample_entropy, cb_entropy, avg_prob = self.soft_entropy_loss(x)
-                entropy_penalty = cb_entropy - self.diversity_gamma * persample_entropy
+                # Old implementation for reference only:
+                # entropy_penalty = cb_entropy - self.diversity_gamma * persample_entropy
+                # The direction above is intentionally kept as a comment because it is
+                # inconsistent with BinarySphericalQuantizer and likely incorrect here.
+                entropy_penalty = self.gamma0 * persample_entropy - self.gamma * cb_entropy
             else:
-                entropy_penalty = persample_entropy = cb_entropy = self.zero
+                entropy_penalty = persample_entropy = cb_entropy = zero_scalar
                 avg_prob = None
 
-            commit_loss = self.zero
+            commit_loss = torch.mean(((quantized.detach() - x) ** 2).sum(dim=-1))
 
             # input back to original dtype if needed
 
@@ -792,10 +814,11 @@ class BSQ(Module):
 
         # complete aux loss
 
-        aux_loss = (
-            commit_loss * self.commitment_loss_weight
-            + (self.zeta * entropy_penalty / self.inv_temperature) * entropy_weight
-        )
+        # entropy_weight is kept in the signature for backward compatibility, but the BSQ
+        # loss is aligned to BinarySphericalQuantizer and no longer scales the entropy term.
+        _ = entropy_weight
+        entropy_scale = float(self.zeta) / float(self.inv_temperature)
+        aux_loss = commit_loss * self.commitment_loss_weight + entropy_scale * entropy_penalty
         # returns
 
         ret = Return(x, indices, bit_indices, aux_loss)

@@ -19,8 +19,14 @@ from .to_container import (
     to_easydict_recursive,
     to_object,
     to_object_recursive,
+    dataclass_to_dict_config,
 )
-from .to_dataclass import dataclass_from_dict, dataclass_to_dict, kwargs_to_dataclass
+from .to_dataclass import (
+    dataclass_from_dict,
+    dataclass_to_dict,
+    dataclass_from_dict_config,
+    kwargs_to_dataclass,
+)
 
 __all__ = [
     "function_config_to_basic_types",

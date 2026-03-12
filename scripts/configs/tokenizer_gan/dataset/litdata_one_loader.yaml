@@ -76,6 +76,7 @@ train_loader:
       7bands_256:
         - [
           "data2/SSL4EO-L/oli_sr/oli_sr_litdata",
+          "data2/SSL4EO-L/tm_toa/ssl4eo_l_tm_toa_litdata",
         ]
         - resize_before_transform: 256
 
@@ -99,7 +100,11 @@ train_loader:
         - resize_before_transform: 128
 
       13bands_128:
-        - ["data2/DCF_2020/LitData_hyper_images"]
+        - ["data2/DCF_2020/LitData_hyper_images",
+           "data/SEN12MS-CR/litdata_s2_cloudy/train",
+           "data/SEN12MS-CR/litdata_s2_cloudy/val",
+           "data/SEN12MS-CR/litdata_s2_cloudy/test",
+        ]
         - resize_before_transform: 128
 
       bigearth_13bands_chw_128:
@@ -140,13 +145,13 @@ train_loader:
       #   - ["/Data2/ZihanCao/dataset/litdataHyperImages"]
       #   - resize_before_transform: 512
 
-      242bands_256:
-        - ["data/MDAS-EeteS/LitData_hyper_images"]
-        - resize_before_transform: 256
+      # 242bands_256:
+      #   - ["data/MDAS-EeteS/LitData_hyper_images"]
+      #   - resize_before_transform: 256
 
-      368bands_256:
-        - ["data/MDAS-HySpex/LitData_hyper_images"]
-        - resize_before_transform: 256
+      # 368bands_256:
+      #   - ["data/MDAS-HySpex/LitData_hyper_images"]
+      #   - resize_before_transform: 256
 
       369bands_128:
         - ["data/EarthView/LitData_neon"]
@@ -157,7 +162,8 @@ train_loader:
     #   - resize_before_transform: 512
     #     is_cycled: true
 
-  macro_sampled_batch_size: {128: 8, 256: 8, 512: 6}
+  macro_sampled_batch_size: {128: 14, 256: 12, 512: 8}
+  # overfit_n_batches: 4
 
   loader_kwargs:
     num_workers: 8
@@ -170,7 +176,7 @@ train_loader:
 
   weights:
     #         3    4  6 7 8  10  12 13 13 32 50 150 175 202 202  224 224 242 368  369
-    [30, 26, 15, 10, 28,28,10, 10, 15, 10, 6, 15, 15, 15, 18, 10, 10, 11, 18]
+    [30, 26, 15, 10, 28,28,10, 10, 15, 10, 6, 15, 15, 15, 18, 10, 18]
 
 val_loader:
   _target_: src.data.litdata_hyperloader.create_hyper_image_litdata_flatten_paths_loader
@@ -235,7 +241,10 @@ val_loader:
         - resize_before_transform: 128
 
       13bands_128:
-        - ["data2/DCF_2020/LitData_hyper_images"]
+        - ["data2/DCF_2020/LitData_hyper_images",
+           "data/SEN12MS-CR/litdata_s2_cloudy/train",
+           "data/SEN12MS-CR/litdata_s2_cloudy/val",
+           "data/SEN12MS-CR/litdata_s2_cloudy/test",]
         - resize_before_transform: 128
 
       bigearth_13bands_chw_128:
@@ -297,16 +306,16 @@ val_loader:
 
   stream_ds_kwargs:
     transform_prob: 0.0
-    resize_before_transform: 256
     shuffle: true
     is_cycled: true
     is_hwc: true
+    # resize_before_transform: 256
 
   loader_kwargs:
-    num_workers: 3
-    pin_memory: false
-    drop_last: true
-    persistent_workers: false
     batch_size: 8
+    num_workers: 6
+    pin_memory: true
+    drop_last: true
+    persistent_workers: true
 
   weights:

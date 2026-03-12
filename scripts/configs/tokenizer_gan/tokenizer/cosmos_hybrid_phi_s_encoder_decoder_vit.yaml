@@ -15,13 +15,13 @@ cnn_cfg:
     latent_channels: 32
     channels: 128
     channels_mult: [2, 4, 4]
-    num_res_blocks: 2
+    num_res_blocks: 1
     attn_resolutions: []
     dropout: 0.0
     spatial_compression: 8
     patch_size: 1
     block_name: res_block
-    norm_type: trmsnorm2d #gn
+    norm_type: gn
     act_type: silu
     adaptive_mode: interp
     downsample_kwargs:
@@ -37,11 +37,15 @@ cnn_cfg:
   decoder_type: default # [default, generative]
 
 trans_enc_cfg:
-  embed_dim: 1152
-  depth: 16
+  embed_dim: 1024
+  depth: 12
   num_heads: 16
   mlp_ratio: 4.0
   qkv_bias: true
+  qk_norm: true
+  drop_rate: 0.1
+  drop_path_rate: 0.1
+  init_values: 1e-4
   patch_size: 2
   norm_layer: flarmsnorm
   pos_embed: learned
@@ -50,18 +54,31 @@ trans_enc_cfg:
   img_size: 32
   in_chans: 768
   out_chans: 768
-  unpatch_size: 1
+  unpatch_size: 2
   reg_tokens: 4
-  compile_model: false
   attn_type: gated
+  compile_model: false
+  mlp_layer: swiglu
+  fix_init: false
+  # moe:
+  #   num_experts: 8
+  #   num_shared_experts: 1
+  #   top_k: 2
+  #   n_group: 1
+  #   topk_group: 1
 
 trans_dec_cfg:
   embed_dim: 1024
   depth: 6
   num_heads: 16
   mlp_ratio: 4.0
+  qk_norm: true
+  drop_rate: 0.1
+  drop_path_rate: 0.1
+  init_values: 1e-4
   qkv_bias: true
   patch_size: 1
+  attn_type: gated
   norm_layer: flarmsnorm
   pos_embed: learned
   pos_embed_grid_size: [32, 32]
@@ -69,7 +86,7 @@ trans_dec_cfg:
   img_size: 32
   in_chans: 768
   out_chans: 768
-  unpatch_size: 2 # sem decoder -> cnn decoder
+  unpatch_size: 1 # sem decoder -> cnn decoder
   reg_tokens: 4
   compile_model: false
 
@@ -79,7 +96,8 @@ distillation_cfg:
   phis_student_source: semantic
   cache_layers:
     low_level: [0, 1, 2, -1]
-    semantic: [5, 11, 17, 23]
+    # semantic: [3, 7, 11, 15]
+    semantic: [1, 4, 7, 11]
   # Optional multi-teacher projection dims for Phi-S:
   # teacher_proj_dims:
   #   dino:
@@ -92,3 +110,5 @@ distillation_cfg:
 hybrid_tokenizer_cfg:
   latent_bottleneck_type: after_semantic
   latent_straight_through_skip: false
+  decoder_ul_lambda0: 5.0
+  decoder_use_ul_noisy_latent: false

@@ -3,12 +3,13 @@
 - 写代码之前你需要先行查看项目规范,还需要说明你准备做什么再修改代码
 - 风格设置查看pyproject.toml文件
 - 遇到用户解释性的问题的时候，尽可能地将细节解释完整，描述清楚; 写代码的时候尽可能的简略完善，不要输出太多东西导致用户误解，保持语言简练
-- Python函数的变量需要有Python >3.12 type hint，不要用List, Tuple (from typing module)这些过时的hint，使用list, tuple这样更现代的typing hint
+- Python函数的变量需要有Python >3.12 type hint，不要用List, Tuple (from typing module)这些过时的hint，使用list, tuple这样更现代的typing hint，不需要从__future__模块导入任务兼容性模块
 - 当明确要求block注释的时候才注释，行内注释自由无限制。注释全部全部用英文编写。
-- 写代码的时候需要考虑复用，尽可能把不同的功能分开成小的子函数
+- 写代码的时候需要考虑复用，尽可能把不同的功能分开成小的子函数。在一个函数中的代码应该注重语义，同一语义下的代码应该在一块，不同语义的代码块空行分开
 - 写完所有的代码之后记得使`ty check`进行语法检查，确保代码无错误，但是只检查你修改的文件，不要check整个库，如果LSP报错但是你确信正确，直接用type: ignore，不要用cast
 - 测试使用pytest编写，放在scripts/tests/目录下，测试不需要跑ty，只需要保证语法正确，测试通过就行
 - 不允许删除任何数据文件，代码文件在用户允许下删除，但需要明确告知
+- DictConfig 不确定的直接用.get('some_key')，不需要额外cast到指定的type
 
 # 语言要求
 - 始终保持自然、对话式的回应风格。

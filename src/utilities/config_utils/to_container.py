@@ -1,10 +1,44 @@
 from collections.abc import Iterable
+from copy import deepcopy
 from functools import wraps
-from typing import Any
+from typing import Any, TypeVar
+from dataclasses import is_dataclass, asdict
 
 from beartype import beartype
 from easydict import EasyDict
 from omegaconf import DictConfig, ListConfig, OmegaConf
+
+T = TypeVar("T")
+
+
+class _SafeEasyDict(EasyDict):
+    def __deepcopy__(self, memo: dict[int, Any]):
+        copied = type(self)()
+        memo[id(self)] = copied
+
+        for key, value in self.items():
+            copied_value = deepcopy(value, memo)
+            super(EasyDict, copied).__setitem__(key, copied_value)
+            copied.__dict__[key] = copied_value
+
+        return copied
+
+
+def dataclass_dict_config_to_dict(d: DictConfig | type[T] | dict) -> dict:
+    if isinstance(d, DictConfig):
+        return OmegaConf.to_container(d, resolve=True)  # type: ignore
+    elif hasattr(d, "__dataclass_fields__"):
+        return asdict(d)  # type: ignore
+    elif isinstance(d, dict):
+        return d
+    else:
+        raise ValueError(f"Unsupported type for dataclass_dict_config_to_dict: {type(d)}")
+
+
+def dataclass_to_dict_config(cls: type[T], strict=False) -> DictConfig:
+    base = OmegaConf.structured(cls)
+    OmegaConf.set_struct(base, strict)
+    return OmegaConf.create(base)
 
 
 def to_object(config: Any):
@@ -17,7 +51,7 @@ def to_object(config: Any):
         return config
 
 
-def to_object_recursive(config: Iterable):
+def to_object_recursive(config: Any):
     """
     Recursively convert a DictConfig or ListConfig to a Python object.
     """
@@ -37,12 +71,16 @@ def to_easydict_recursive(config: Any):
     For dictionaries with non-string keys, keeps them as regular dictionaries
     since EasyDict only supports string keys.
     """
+    # if is a dataclass config
+    if is_dataclass(config):
+        config = asdict(config)
+
     # if is iterable, check if is a DictConfig or ListConfig
     if isinstance(config, (dict, DictConfig)):
         # Check if all keys are strings - if so, use EasyDict, otherwise use regular dict
         if all(isinstance(k, str) for k in config.keys()):
             # Create empty EasyDict and populate it properly
-            result = EasyDict()
+            result = _SafeEasyDict()
             # Clear any default content
             result.clear()
             for k, v in config.items():
@@ -53,9 +91,8 @@ def to_easydict_recursive(config: Any):
                 # Also set in __dict__ for attribute access
                 result.__dict__[k] = processed_value
             return result
-        else:
-            # For non-string keys, keep as regular dict but still recurse on values
-            return {k: to_easydict_recursive(v) for k, v in config.items()}
+        # For non-string keys, keep as regular dict but still recurse on values
+        return {k: to_easydict_recursive(v) for k, v in config.items()}
     elif isinstance(config, (list, ListConfig)):
         return [to_easydict_recursive(item) for item in config]
 

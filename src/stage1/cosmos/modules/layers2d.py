@@ -50,6 +50,7 @@ from src.utilities.network_utils import (
 from src.utilities.network_utils import safe_init_weights
 
 from .blocks import (
+    AdaptiveConvMode,
     AdaptiveInputConvLayer,
     AdaptiveOutputConvLayer,
     ConvNeXtBlock,
@@ -221,6 +222,7 @@ def make_block_fn(
                 attn_backend=swin_attn_backend,
                 window_backend=swin_window_backend,
                 mlp_cls=SwiGLU,
+                act_checkpoint=act_checkpoint,
             )
 
     else:
@@ -285,8 +287,12 @@ class Encoder(nn.Module):
         norm_type: str = "gn",
         norm_groups: int = 32,
         resample_norm_keep: bool = False,
-        adaptive_mode: Literal["slice", "interp", "interp_proj", "mix"] = "slice",
+        adaptive_mode: AdaptiveConvMode = "slice",
         adaptive_conv_kwargs: dict = {},
+        adaptive_input_mode: AdaptiveConvMode | None = None,
+        adaptive_output_mode: AdaptiveConvMode | None = None,
+        adaptive_input_conv_kwargs: dict | None = None,
+        adaptive_output_conv_kwargs: dict | None = None,
         **ignore_kwargs,
     ):
         super().__init__()
@@ -320,6 +326,8 @@ class Encoder(nn.Module):
         )
 
         # input conv
+        input_mode = adaptive_input_mode or adaptive_mode
+        input_kwargs = adaptive_conv_kwargs if adaptive_input_conv_kwargs is None else adaptive_input_conv_kwargs
         self.use_diffbands_input = isinstance(in_channels, (list, tuple))
         if self.use_diffbands_input:
             assert isinstance(in_channels, (list, tuple))
@@ -339,8 +347,8 @@ class Encoder(nn.Module):
                 in_channels=in_channels_int,
                 out_channels=channels,
                 use_bias=True,
-                mode=adaptive_mode,
-                **extract_needed_kwargs(adaptive_conv_kwargs, AdaptiveInputConvLayer),
+                mode=input_mode,
+                **extract_needed_kwargs(input_kwargs, AdaptiveInputConvLayer),
             )
 
         # downsampling
@@ -435,7 +443,6 @@ class Encoder(nn.Module):
         # Init weights
         self.init_weights()
 
-    @no_type_check
     def forward(
         self, x: torch.Tensor, ret_interm_feats: bool | tuple | list = False
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
@@ -445,10 +452,15 @@ class Encoder(nn.Module):
             or all encoder features, and additional middle block feauture.
         """
         x = self.patcher(x)
+        h = self.conv_in(x)
+        return self.forward_from_conv_in(h, ret_interm_feats=ret_interm_feats)
+
+    @no_type_check
+    def forward_from_conv_in(
+        self, h: torch.Tensor, ret_interm_feats: bool | tuple | list = False
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         feats = []
 
-        # downsampling
-        h = self.conv_in(x)
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](h)
@@ -545,8 +557,12 @@ class Decoder(nn.Module):
         patch_size: int = 4,
         patch_method: str = "haar",
         resample_norm_keep: bool = False,
-        adaptive_mode: Literal["slice", "interp", "interp_proj", "mix"] = "interp",
+        adaptive_mode: AdaptiveConvMode = "interp",
         adaptive_conv_kwargs: dict = {},
+        adaptive_input_mode: AdaptiveConvMode | None = None,
+        adaptive_output_mode: AdaptiveConvMode | None = None,
+        adaptive_input_conv_kwargs: dict | None = None,
+        adaptive_output_conv_kwargs: dict | None = None,
         **ignore_kwargs,
     ):
         super().__init__()
@@ -666,6 +682,8 @@ class Decoder(nn.Module):
 
         # end
         self.norm_out = Normalize(block_in, norm_type=norm_type, num_groups=norm_groups)
+        output_mode = adaptive_output_mode or adaptive_mode
+        output_kwargs = adaptive_conv_kwargs if adaptive_output_conv_kwargs is None else adaptive_output_conv_kwargs
 
         out_ch: int | list[int]
         if isinstance(out_channels, list):
@@ -680,8 +698,8 @@ class Decoder(nn.Module):
                 in_channels=block_in,
                 out_channels=out_ch,
                 use_bias=True,
-                mode=adaptive_mode,
-                **extract_needed_kwargs(adaptive_conv_kwargs, AdaptiveOutputConvLayer),
+                mode=output_mode,
+                **extract_needed_kwargs(output_kwargs, AdaptiveOutputConvLayer),
             )
 
         # Ignore it: fsdp warpper, but not used
@@ -812,7 +830,7 @@ class GenerativeDecoder(Decoder):
         patch_size: int = 4,
         patch_method: str = "haar",
         resample_norm_keep: bool = False,
-        adaptive_mode: Literal["slice", "interp", "interp_proj", "mix"] = "slice",
+        adaptive_mode: AdaptiveConvMode = "slice",
         adaptive_conv_kwargs: dict = {},
         per_layer_noise: bool = False,
         **ignore_kwargs,

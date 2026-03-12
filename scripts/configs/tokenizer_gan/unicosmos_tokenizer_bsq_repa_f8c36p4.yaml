@@ -1,11 +1,6 @@
-hydra:
-  output_subdir: null
-  run:
-    dir: .
-
 defaults:
   # tokenizer ==========
-  - dataset: mars # [hyperspectral, unified_hyperspectral]
+  - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral, litdata_one_loader]
   - tokenizer: uni_cosmos_f8c16p1_nested # base tokenizer
   - quantizer: quant
   - accelerator: base
@@ -17,26 +12,31 @@ defaults:
   - override hydra/hydra_logging: disabled
   - override hydra/job_logging: disabled
 
+hydra:
+  run:
+    dir: runs/stage1_cosmos_bsq/${now:%Y-%m-%d}/${now:%H-%M-%S}_${train.log.run_comment}
+  output_subdir: hydra_config
+
 accelerator:
   gradient_accumulation_plugin:
     num_steps: 1
 
 dataset:
   train_loader:
-    macro_sampled_batch_size: { 128: 16, 256: 10, 512: 4 }
+    macro_sampled_batch_size: { 128: 32, 256: 16, 512: 16 }
     loader_kwargs:
-      num_workers: 6
+      num_workers: 12
       batch_size: 6
       prefetch_factor: 2
       persistent_workers: true
   val_loader:
-    macro_sampled_batch_size: { 128: 8, 256: 8, 512: 6 }
+    macro_sampled_batch_size: { 128: 8, 256: 8, 512: 8 }
     loader_kwargs:
-      num_workers: 2
+      num_workers: 6
       batch_size: 4
-      pin_memory: false
+      pin_memory: true
       drop_last: true
-      persistent_workers: false
+      persistent_workers: true
 
 vq_loss:
   # perceptual loss
@@ -78,6 +78,7 @@ vq_loss:
   # quantizer loss
   quantizer_type: bsq
   quantizer_options:
+    quantizer_loss_weight: 1.
   # discriminator loss
   disc_network_type: patchgan # [patchgan, patchgan_v2, stylegan, r3gan]
   disc_ndf: 128
@@ -100,51 +101,38 @@ vq_loss:
     windows_size: [2, 2]
 
 tokenizer:
-  # repa
-  use_repa_loss: false
-  use_vf_loss: false
-  hook_module: decoder.decoder.mid.block_2
-  vf_on_z_or_module: z # [z, module]
-  dino_feature_dim: 1024
+  cfg:
+    # quantizer
+    quantizer_type: bsq
 
-  # quantizer
-  quantizer_type: bsq
+    # loading
+    uni_path: #runs/pretrained/cosmos_f8c64_bsq/ema/tokenizer/model.safetensors
+    loading_type: #pretrained
 
-  # loading
-  uni_path: runs/pretrained/cosmos_f8c64_bsq/ema/tokenizer/model.safetensors
-  loading_type: pretrained
+    # augmentations
+    latent_noise_prob: 0.0
+    use_channel_drop: false
 
-  # augmentations
-  latent_noise_prob: 0.0
-  use_channel_drop: false
+    # qat
+    quantize_to_int8: false
 
-  # blocks
-  model:
-    norm_type: gn
-    norm_groups: 32
-    block_name: res_block
-    moe_token_mixer_type: res_block
-    hidden_factor: 4
-    use_residual_factor: false
+    # repa
+    use_repa_loss: false
 
-    # others
-    patch_method: haar
-    patch_size: 1
-    attn_type: none
-    padding_mode: reflect # for boundary?
-    adaptive_mode: interp
+    bsq_flip_prob: 0.1
+    bsq_group_size: 1
 
-    # latents
-    latent_channels: 64
-    z_channels: 256 # [256, 16]
+    model:
+      latent_channels: 64
+      act_checkpoint: true
 
-    # train
-    act_checkpoint: true
-
-  channel_drop_config:
-    drop_type: ${list:[4, 8, 12]}
-    max_channels: ${tokenizer.model.latent_channels}
-    drop_prob: 0.5
+  dec_cfg:
+    swin_replace_levels: [1,2]
+    swin_replace_mid: true
+    swin_num_heads: 16
+    swin_window_size: 8
+    swin_shift_size: 3
+    num_res_blocks: 6
 
 ema:
   _target_: ema_pytorch.EMA
@@ -182,8 +170,8 @@ peft:
 
 train:
   tokenizer_name: cosmos_bsq_lora
-  proj_dir: runs/stage1_cosmos_bsq/
-  finetune_strategy: peft
+  proj_dir: null
+  finetune_strategy: finetune_all # peft
   max_grad_norm: 1.0
   track_metrics: true
   track_metrics_duration: -1
@@ -196,10 +184,11 @@ train:
   only_load_tokenizer: false
   grad_check: false
   compile_model: false
-  resume_path: #runs/stage1_cosmos_bsq/2025-11-16_21-18-55_nested_cosmos_f8c64p1_bsq_repa_unified_hyperspectral/checkpoints/checkpoint_48
+  resume_path: runs/stage1_cosmos_bsq/2026-03-12/02-39-31_nested_cosmos_f8c64p1_bsq/checkpoints/checkpoint_11
   ema_load_path:
+  proxy_task_train_type: unified
   # lora specifics
-  conv_in_out_reinit: true # if do not have the same channels in pretrain stage, set this to true
+  conv_in_out_reinit: false # if do not have the same channels in pretrain stage, set this to true
   add_norms: false
   save_peft_ckpts: true
 
@@ -214,16 +203,16 @@ train:
     oned_param_algo: lion
     use_triton: true
     muon_params_defaults:
-      lr: 3.0e-4
-      weight_decay: 0.02
+      lr: 4.0e-4
+      weight_decay: 0.1
     oned_params_defaults:
-      lr: 3.0e-4
+      lr: 4.0e-4
       weight_decay: 0.0
 
   disc_optimizer:
     _target_: torch.optim.AdamW
     _partial_: true
-    lr: 2.0e-4
+    lr: 4.0e-4
     betas: ${tuple:[0.5, 0.9]}
     weight_decay: 1.0e-6
     eps: 1.0e-8
@@ -248,14 +237,14 @@ train:
     min_lr: 1.0e-5
 
   log:
-    run_comment: nested_cosmos_f${tokenizer.model.spatial_compression}c${tokenizer.model.latent_channels}p1_bsq_repa_${dataset.used}
+    run_comment: nested_cosmos_f8c64p1_bsq
     log_with_time: true
     visualize_every: 500
     log_every: 10
-    log_with: ["swanlab"]
+    log_with: []
     exp_name: bsq-lora
 
-  debug: true
+  debug: false
 
 val:
   val_duration: 1000

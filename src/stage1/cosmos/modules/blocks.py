@@ -7,9 +7,6 @@ from typing import (
     Callable,
     Literal,
     Optional,
-    Tuple,
-    TypeVar,
-    Union,
     no_type_check,
 )
 
@@ -42,6 +39,27 @@ from .utils import (
 )
 
 natten = lazy_loader.load("natten")
+
+type AdaptiveConvMode = Literal[
+    "slice",
+    "interp",
+    "interp_proj",
+    "mix",
+    "sitok",
+    "sitok_film",
+    "sitok_pointwise",
+    "cross_attn",
+]
+type AdaptiveLinearMode = Literal["slice", "interp", "sitok", "sitok_film", "sitok_pointwise"]
+type ChannelMixRouterCondition = Literal[
+    "none",
+    "per_channel_mean",
+    "per_channel_dw_pool",
+    "per_channel_mean_dw_pool",
+]
+type SitokReduceMode = Literal["none", "sum", "mean", "pointwise"]
+type KernelNormDim = Literal["c_in", "c_out"]
+type SitokOutputVariant = Literal["film", "pointwise"]
 
 
 # * --- Utilities --- #
@@ -768,7 +786,7 @@ class Mlp(nn.Module):
 # * --- Input and output convs with different bands images --- #
 
 
-def _create_conv_in_module(basic_module: str, c: int, hidden_dim: int, padding_mode: str, norm_type: str = "rmsnorm2d"):
+def _create_conv_in_module(basic_module: str, c: int, hidden_dim: int, padding_mode, norm_type: str = "rmsnorm2d"):
     if basic_module == "conv":
         module = nn.Conv2d(
             in_channels=c,
@@ -1129,7 +1147,7 @@ class DiffBandsInputConvOut(nn.Module):
 def _kernel_norm(
     w: Annotated[Tensor, "c_out c_in k k"],
     kernel_norm: str | None,
-    dim: Literal["c_in", "c_out"] = "c_in",
+    dim: KernelNormDim = "c_in",
 ) -> Annotated[Tensor, "c_out c_in k k"]:
     if kernel_norm is None:
         return w
@@ -1200,12 +1218,7 @@ class _ChannelMixRouter(nn.Module):
         self,
         *,
         base_channels: int,
-        condition: Literal[
-            "none",
-            "per_channel_mean",
-            "per_channel_dw_pool",
-            "per_channel_mean_dw_pool",
-        ] = "none",
+        condition: ChannelMixRouterCondition = "none",
         hidden_dim: int = 128,
         temperature: float = 1.0,
         use_bias: bool = True,
@@ -1327,22 +1340,19 @@ class AdaptiveInputConvLayer(nn.Module):
         groups: int = 1,
         padding: int | None = None,
         use_bias: bool = False,
-        mode: Literal["slice", "interp", "interp_proj", "mix", "sitok", "sitok_film", "sitok_pointwise"] = "slice",
+        mode: AdaptiveConvMode = "slice",
         k_hidden: int | None = None,
         kernel_norm: str | None = None,
-        router_condition: Literal[
-            "none",
-            "per_channel_mean",
-            "per_channel_dw_pool",
-            "per_channel_mean_dw_pool",
-        ] = "none",
+        router_condition: ChannelMixRouterCondition = "none",
         router_hidden_dim: int = 128,
         router_temperature: float = 1.0,
         always_use_router: bool = False,
         router_dw_kernel_size: int = 3,
-        sitok_reduce: Literal["none", "sum", "mean", "pointwise"] = "none",
+        sitok_reduce: SitokReduceMode = "none",
         sitok_embed_scale: float = 1.0,
         sitok_embed_base: float = 10000.0,
+        cross_attn_pool_size: int = 4,
+        cross_attn_embed_dim: int = 64,
     ):
         """
         Adaptive 2D convolution with a variable number of input channels.
@@ -1377,19 +1387,28 @@ class AdaptiveInputConvLayer(nn.Module):
             if groups != 1:
                 raise ValueError("AdaptiveInputConvLayer(mode='sitok') currently requires groups=1")
             conv_groups = 1
+        elif mode == "cross_attn":
+            if groups != 1:
+                raise ValueError("AdaptiveInputConvLayer(mode='cross_attn') currently requires groups=1")
+            conv_groups = out_channels
         conv_kwargs = dict(stride=stride, groups=conv_groups, dilation=dilation, bias=use_bias)
         if padding is not None:
             # if padding not set, the create_conv2d will use same padding
             conv_kwargs["padding"] = padding
 
-        self.conv = create_conv2d((1 if mode == "sitok" else in_channels), out_channels, kernel_size, **conv_kwargs)
+        conv_in_channels = 1 if mode == "sitok" else (out_channels if mode == "cross_attn" else in_channels)
+        self.conv = create_conv2d(conv_in_channels, out_channels, kernel_size, **conv_kwargs)
         self.mode = mode
         self.kernel_norm = kernel_norm
         self.always_use_router = always_use_router
         self.sitok_reduce = sitok_reduce
         self.sitok_embed_scale = float(sitok_embed_scale)
         self.sitok_embed_base = float(sitok_embed_base)
+        self.cross_attn_pool_size = int(cross_attn_pool_size)
+        self.cross_attn_embed_dim = int(cross_attn_embed_dim)
         self.sitok_reduce_head: nn.Module | None = None
+        self.cross_attn_band_proj: nn.Linear | None = None
+        self.cross_attn_query: nn.Parameter | None = None
 
         if mode == "interp_proj":
             # (bs, c, k1, k2) img -> (c_out, c_in, k1, k2) kernel
@@ -1431,6 +1450,15 @@ class AdaptiveInputConvLayer(nn.Module):
                     nn.SiLU(),
                     nn.Linear(out_channels, out_channels, bias=True),
                 )
+        elif mode == "cross_attn":
+            if self.cross_attn_pool_size <= 0:
+                raise ValueError(f"{cross_attn_pool_size=} must be > 0")
+            if self.cross_attn_embed_dim <= 0:
+                raise ValueError(f"{cross_attn_embed_dim=} must be > 0")
+            pooled_dim = self.cross_attn_pool_size * self.cross_attn_pool_size
+            self.cross_attn_band_proj = nn.Linear(pooled_dim, self.cross_attn_embed_dim, bias=use_bias)
+            self.cross_attn_query = nn.Parameter(torch.empty(1, out_channels, self.cross_attn_embed_dim))
+            nn.init.trunc_normal_(self.cross_attn_query, std=0.02)
 
         self.forward_mappings: dict[str, Callable[..., Tensor]] = {
             "slice": self._slice_forward,
@@ -1438,10 +1466,14 @@ class AdaptiveInputConvLayer(nn.Module):
             "interp_proj": self._interp_proj_forward,
             "mix": self._mix_forward,
             "sitok": self._sitok_forward,
+            "cross_attn": self._cross_attn_forward,
         }
 
     def _forward_conv_with_wb(self, x, w, b):
-        x = nn.functional.conv2d(  # type: ignore
+        w = w.to(device=x.device, dtype=x.dtype)
+        if b is not None:
+            b = b.to(device=x.device, dtype=x.dtype)
+        x = nn.functional.conv2d(
             x,
             w,
             b,
@@ -1555,13 +1587,33 @@ class AdaptiveInputConvLayer(nn.Module):
 
     def _sitok_forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        SiTok-style spectrum-independent patch embedding:
-          - apply the SAME 2D conv kernel to each spectral channel independently
-          - add a sinusoidal channel index embedding to mark spectral position
+        Apply a shared spatial kernel to variable-length spectral inputs in a SiTok-style way.
 
-        Output:
-          - sitok_reduce == "none": (b, c_in * c_out, h, w)
-          - sitok_reduce in {"sum","mean","pointwise"}: (b, c_out, h, w)
+        The same normalized 2D kernel is reused for every spectral band, while an optional
+        sinusoidal channel-index embedding provides spectral-position information. The reduction
+        mode controls whether band-wise outputs are kept explicitly or collapsed into a fixed-width
+        output tensor:
+
+        - ``"none"``:
+          apply the shared kernel to every input band independently and keep all band outputs.
+          This produces ``(B, C_in * C_out, H_out, W_out)`` and is the most expressive, but it
+          materializes the largest activation tensor.
+        - ``"pointwise"``:
+          compute a learned spectral mixing matrix from the channel-index embeddings, mix the raw
+          input bands into ``C_out`` channels with ``einsum``, then apply the shared kernel once.
+          This avoids materializing ``(B, C_in, C_out, H, W)`` while still allowing per-output
+          spectral weighting.
+        - ``"sum"`` / ``"mean"``:
+          first reduce the spectral axis to a single aggregated map and then apply the shared
+          kernel once. Because convolution is linear and shared across bands, this is equivalent to
+          summing or averaging per-band outputs, but is much cheaper in memory and compute.
+
+        Args:
+            x: Input tensor of shape ``(B, C_in, H, W)``.
+
+        Returns:
+            Output tensor of shape ``(B, C_in * C_out, H_out, W_out)`` when
+            ``sitok_reduce == "none"``, otherwise ``(B, C_out, H_out, W_out)``.
         """
         bsz, in_channels, h, w = x.shape
         w_shared = _kernel_norm(self.conv.weight, self.kernel_norm, "c_in")
@@ -1627,6 +1679,7 @@ class AdaptiveInputConvLayer(nn.Module):
             )
             return y
 
+        # first mean_out c -> 1, then conv
         if self.sitok_reduce in ("sum", "mean"):
             if self.sitok_reduce == "sum":
                 x_agg = x.sum(dim=1, keepdim=True)
@@ -1660,8 +1713,44 @@ class AdaptiveInputConvLayer(nn.Module):
         y = None
         raise ValueError(f"Unknown sitok_reduce: {self.sitok_reduce}")
 
+    def _cross_attn_project_band_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        if self.cross_attn_band_proj is None:
+            raise RuntimeError("cross_attn_band_proj is missing while mode='cross_attn'")
+        p = int(self.cross_attn_pool_size)
+        x_pool = F.adaptive_avg_pool2d(x, output_size=(p, p))
+        band_desc = rearrange(x_pool, "b c p1 p2 -> b c (p1 p2)")
+        proj_dtype = self.cross_attn_band_proj.weight.dtype
+        return self.cross_attn_band_proj(band_desc.to(dtype=proj_dtype))
+
+    def _cross_attn_alpha(self, band_tokens: torch.Tensor, x_dtype: torch.dtype) -> torch.Tensor:
+        if self.cross_attn_query is None:
+            raise RuntimeError("cross_attn_query is missing while mode='cross_attn'")
+        query = self.cross_attn_query.expand(band_tokens.shape[0], -1, -1).contiguous()
+        band_tokens_t = band_tokens.transpose(1, 2).contiguous()
+        logits = torch.matmul(query, band_tokens_t)
+        logits = logits * (query.shape[-1] ** -0.5)
+        alpha = logits.softmax(dim=-1).transpose(1, 2)
+        return alpha.to(dtype=x_dtype)
+
+    def _cross_attn_spectral_mix(self, x: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+        bsz, _, height, width = x.shape
+        x_flat = x.reshape(bsz, x.shape[1], height * width).contiguous()
+        alpha_t = alpha.transpose(1, 2).contiguous()
+        x_mix = torch.bmm(alpha_t, x_flat)
+        return x_mix.reshape(bsz, alpha_t.shape[1], height, width)
+
+    def _cross_attn_forward(self, x: torch.Tensor) -> torch.Tensor:
+        band_tokens = self._cross_attn_project_band_tokens(x)
+        alpha = self._cross_attn_alpha(band_tokens, x.dtype)
+        x_mix = self._cross_attn_spectral_mix(x, alpha)
+        w_shared = _kernel_norm(self.conv.weight, self.kernel_norm, "c_in")
+        return self._forward_conv_with_wb(x_mix, w_shared, self.conv.bias)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         in_channels = x.shape[1]
+
+        if self.mode in ("sitok", "cross_attn"):
+            return self.forward_mappings[self.mode](x)
 
         # Native case
         if (not self.always_use_router) and in_channels == self.conv.weight.shape[1]:
@@ -1688,6 +1777,8 @@ class AdaptiveInputConvLayer(nn.Module):
                     nn.init.zeros_(m.bias)
 
         self.apply(_inner)
+        if self.cross_attn_query is not None:
+            nn.init.trunc_normal_(self.cross_attn_query, std=0.02)
 
 
 class AdaptiveOutputConvLayer(nn.Module):
@@ -1701,23 +1792,10 @@ class AdaptiveOutputConvLayer(nn.Module):
         groups: int = 1,
         padding: int | None = None,
         use_bias: bool = False,
-        mode: Literal[
-            "slice",
-            "interp",
-            "interp_proj",
-            "mix",
-            "sitok",
-            "sitok_film",
-            "sitok_pointwise",
-        ] = "slice",
+        mode: AdaptiveConvMode = "slice",
         k_hidden: int | None = None,
         kernel_norm: str | None = None,
-        router_condition: Literal[
-            "none",
-            "per_channel_mean",
-            "per_channel_dw_pool",
-            "per_channel_mean_dw_pool",
-        ] = "none",
+        router_condition: ChannelMixRouterCondition = "none",
         router_hidden_dim: int = 128,
         router_temperature: float = 1.0,
         router_dw_kernel_size: int = 3,
@@ -1726,6 +1804,8 @@ class AdaptiveOutputConvLayer(nn.Module):
         sitok_basis_dim: int = 32,
         sitok_embed_scale: float = 1.0,
         sitok_embed_base: float = 10000.0,
+        cross_attn_pool_size: int = 4,
+        cross_attn_embed_dim: int = 64,
     ):
         """
         Adaptive 2D convolution with a variable number of output channels.
@@ -1758,17 +1838,25 @@ class AdaptiveOutputConvLayer(nn.Module):
             mode = "sitok_film"
         self.mode = mode
         self.default_out_channels = out_channels
+        self.cross_attn_pool_size = int(cross_attn_pool_size)
+        self.cross_attn_embed_dim = int(cross_attn_embed_dim)
 
         conv_out_channels = out_channels
+        conv_groups = groups
         if mode == "sitok_film":
             conv_out_channels = 1
         elif mode == "sitok_pointwise":
             if sitok_basis_dim <= 0:
                 raise ValueError(f"{sitok_basis_dim=} must be > 0")
             conv_out_channels = int(sitok_basis_dim)
+        elif mode == "cross_attn":
+            if groups != 1:
+                raise ValueError("AdaptiveOutputConvLayer(mode='cross_attn') currently requires groups=1")
+            conv_out_channels = in_channels
+            conv_groups = in_channels
         conv_kwargs = dict(
             stride=stride,
-            groups=groups,
+            groups=conv_groups,
             dilation=dilation,
             bias=use_bias,
         )
@@ -1782,6 +1870,9 @@ class AdaptiveOutputConvLayer(nn.Module):
             **conv_kwargs,
         )
         self.kernel_norm = kernel_norm
+        self.cross_attn_kv_proj: nn.Linear | None = None
+        self.cross_attn_q_proj: nn.Linear | None = None
+        self.cross_attn_pw_head: nn.Linear | None = None
 
         if mode == "interp_proj":
             # For output channels, we project the output channel dimension
@@ -1849,6 +1940,14 @@ class AdaptiveOutputConvLayer(nn.Module):
             nn.init.zeros_(last.bias)
             if self.sitok_variant == "film":
                 last.bias.data[0] = 1.0
+        elif mode == "cross_attn":
+            if self.cross_attn_pool_size <= 0:
+                raise ValueError(f"{cross_attn_pool_size=} must be > 0")
+            if self.cross_attn_embed_dim <= 0:
+                raise ValueError(f"{cross_attn_embed_dim=} must be > 0")
+            self.cross_attn_kv_proj = nn.Linear(in_channels, self.cross_attn_embed_dim, bias=use_bias)
+            self.cross_attn_q_proj = nn.Linear(self.cross_attn_embed_dim, self.cross_attn_embed_dim, bias=use_bias)
+            self.cross_attn_pw_head = nn.Linear(self.cross_attn_embed_dim, in_channels + 1, bias=True)
 
         # Initialize forward mappings
         self.forward_mappings: dict[str, Callable[..., Tensor]] = {
@@ -1859,11 +1958,12 @@ class AdaptiveOutputConvLayer(nn.Module):
             "sitok_film": self._sitok_film_forward,
             "sitok_pointwise": self._sitok_pointwise_forward,
             "sitok": self._sitok_film_forward,  # backward-compatible alias
+            "cross_attn": self._cross_attn_forward,
         }
 
     def _forward_conv_with_wb(self, x, w, b):
         """Perform convolution with custom weights and bias"""
-        return nn.functional.conv2d(  # type: ignore
+        return nn.functional.conv2d(
             x,
             w,
             b,
@@ -2061,11 +2161,63 @@ class AdaptiveOutputConvLayer(nn.Module):
         y = torch.einsum("bdhw,od->bohw", h, w) + b[None, :, None, None]
         return y
 
+    def _cross_attn_project_kv_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        if self.cross_attn_kv_proj is None:
+            raise RuntimeError("cross_attn_kv_proj is missing while mode='cross_attn'")
+        p = int(self.cross_attn_pool_size)
+        x_pool = F.adaptive_avg_pool2d(x, output_size=(p, p))
+        kv_tokens = rearrange(x_pool, "b c p1 p2 -> b (p1 p2) c")
+        proj_dtype = self.cross_attn_kv_proj.weight.dtype
+        return self.cross_attn_kv_proj(kv_tokens.to(dtype=proj_dtype))
+
+    def _cross_attn_output_queries(
+        self,
+        batch_size: int,
+        out_channels: int,
+        *,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if self.cross_attn_q_proj is None:
+            raise RuntimeError("cross_attn_q_proj is missing while mode='cross_attn'")
+        q_dtype = self.cross_attn_q_proj.weight.dtype
+        emb = _sincos_channel_index_embedding(
+            out_channels,
+            self.cross_attn_embed_dim,
+            device=device,
+            dtype=q_dtype,
+        )
+        q = self.cross_attn_q_proj(emb)
+        return q.unsqueeze(0).expand(batch_size, -1, -1)
+
+    def _cross_attn_dynamic_pointwise(self, h: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        if self.cross_attn_pw_head is None:
+            raise RuntimeError("cross_attn_pw_head is missing while mode='cross_attn'")
+        params = self.cross_attn_pw_head(z)
+        w_pw = params[..., : h.shape[1]].to(dtype=h.dtype)
+        b_pw = params[..., h.shape[1]].to(dtype=h.dtype)
+        bsz, _, height, width = h.shape
+        h_flat = h.reshape(bsz, h.shape[1], height * width).contiguous()
+        y = torch.bmm(w_pw.contiguous(), h_flat)
+        y = y.reshape(bsz, w_pw.shape[1], height, width)
+        return y + b_pw[:, :, None, None]
+
+    def _cross_attn_forward(self, x: torch.Tensor, out_channels: int) -> torch.Tensor:
+        w_shared = _kernel_norm(self.conv.weight, self.kernel_norm, "c_out")
+        h = self._forward_conv_with_wb(x, w_shared, self.conv.bias)
+        kv = self._cross_attn_project_kv_tokens(h)
+        q = self._cross_attn_output_queries(h.shape[0], out_channels, device=h.device)
+        z = F.scaled_dot_product_attention(q.unsqueeze(1), kv.unsqueeze(1), kv.unsqueeze(1), dropout_p=0.0)
+        return self._cross_attn_dynamic_pointwise(h, z.squeeze(1))
+
     def forward(self, x: torch.Tensor, out_channels: Optional[int] = None) -> torch.Tensor:
         if out_channels is None:
-            out_channels = self.default_out_channels if self.mode.startswith("sitok") else self.conv.out_channels
+            out_channels = (
+                self.default_out_channels
+                if (self.mode.startswith("sitok") or self.mode == "cross_attn")
+                else self.conv.out_channels
+            )
 
-        if self.mode in ("sitok_film", "sitok_pointwise"):
+        if self.mode in ("sitok_film", "sitok_pointwise", "cross_attn"):
             return self.forward_mappings[self.mode](x, out_channels)
 
         # Native case - if output channels match, use direct convolution
@@ -2097,6 +2249,14 @@ class AdaptiveOutputConvLayer(nn.Module):
                 torch.nn.init.trunc_normal_(lin.weight, std=0.02)
                 if lin.bias is not None:
                     torch.nn.init.zeros_(lin.bias)
+        elif self.mode == "cross_attn":
+            assert self.cross_attn_kv_proj is not None
+            assert self.cross_attn_q_proj is not None
+            assert self.cross_attn_pw_head is not None
+            for linear in (self.cross_attn_kv_proj, self.cross_attn_q_proj, self.cross_attn_pw_head):
+                torch.nn.init.trunc_normal_(linear.weight, std=0.02)
+                if linear.bias is not None:
+                    torch.nn.init.zeros_(linear.bias)
         elif self.mode.startswith("sitok"):
             for m in self.sitok_head.modules():
                 if isinstance(m, nn.Linear):
@@ -2115,10 +2275,10 @@ class AdaptiveInputLinearLayer(nn.Module):
         in_features: int,
         out_features: int,
         bias: bool = True,
-        mode: Literal["slice", "interp", "sitok", "sitok_film", "sitok_pointwise"] = "slice",
+        mode: AdaptiveLinearMode = "slice",
         *,
         sitok_group_size: int | None = None,
-        sitok_reduce: Literal["none", "sum", "mean", "pointwise"] = "none",
+        sitok_reduce: SitokReduceMode = "none",
         sitok_embed_scale: float = 1.0,
         sitok_embed_base: float = 10000.0,
     ) -> None:
@@ -2276,7 +2436,7 @@ class AdaptiveOutputLinearLayer(nn.Module):
         in_features: int,
         out_features: int,
         bias: bool = True,
-        mode: Literal["slice", "interp", "sitok", "sitok_film", "sitok_pointwise"] = "slice",
+        mode: AdaptiveLinearMode = "slice",
         *,
         sitok_group_size: int | None = None,
         sitok_embed_dim: int = 16,
@@ -2297,7 +2457,7 @@ class AdaptiveOutputLinearLayer(nn.Module):
         self.sitok_basis_dim = int(sitok_basis_dim)
         self.sitok_embed_scale = float(sitok_embed_scale)
         self.sitok_embed_base = float(sitok_embed_base)
-        self.sitok_variant: Literal["film", "pointwise"] | None = None
+        self.sitok_variant: SitokOutputVariant | None = None
         self.sitok_head: nn.Module | None = None
 
         if mode in ("sitok_film", "sitok_pointwise"):
@@ -2817,7 +2977,7 @@ class ResnetBlock(nn.Module):
 
         if in_channels != out_channels:
             if nin_shortcut_norm:
-                self.nin_shortcut = nn.Sequential(  # type: ignore
+                self.nin_shortcut = nn.Sequential(
                     Normalize(in_channels, num_groups=gn_norm_groups, norm_type=norm_type),
                     nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0),
                 )
@@ -2836,7 +2996,7 @@ class ResnetBlock(nn.Module):
         if self.use_dico_cca:
             self.dico_cca = DiCoCompactChannelAttention(out_channels)
 
-    # @compile_decorator
+    @compile_decorator
     def forward_fn(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         h = x
         h = self.norm1(h)

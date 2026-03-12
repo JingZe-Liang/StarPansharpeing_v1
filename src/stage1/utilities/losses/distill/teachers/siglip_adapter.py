@@ -83,6 +83,8 @@ def load_siglip2_model(
     use_automodel: bool = True,
     cache_dir: str | Path | None = None,
     local_files_only: bool = True,
+    *,
+    local_file_path: str | None = "/Data2/ZihanCao/Checkpoints/Siglip2-so400m-patch16-naflex/checkpoint",
 ) -> tuple[nn.Module, SiglipProcessor]:
     if use_bnb:
         bnb_config = BitsAndBytesConfig(load_in_4bit=True)
@@ -96,7 +98,7 @@ def load_siglip2_model(
         cache_dir = Path.home() / ".cache/huggingface/hub"
 
     model = AutoModel.from_pretrained(
-        name,
+        name if local_file_path is None else local_file_path,
         quantization_config=bnb_config,
         device_map=None,
         cache_dir=cache_dir,
@@ -105,7 +107,9 @@ def load_siglip2_model(
     )
     model.text_model = None
     vision_model = model.vision_model
-    processor = AutoProcessor.from_pretrained(name, cache_dir=cache_dir, local_files_only=local_files_only)
+    processor = AutoProcessor.from_pretrained(
+        name if local_file_path is None else local_file_path, cache_dir=cache_dir, local_files_only=local_files_only
+    )
 
     global SIGLIP2_FEATURE_INDEX
     SIGLIP2_FEATURE_INDEX = SIGLIP2_INTERACTION_INDEXES[name]

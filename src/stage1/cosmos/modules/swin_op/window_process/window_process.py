@@ -63,6 +63,7 @@ class WindowProcess(torch.autograd.Function):
         shift_size = ctx.shift_size
         window_size = ctx.window_size
 
+        grad_in = grad_in.contiguous()
         grad_out = _window_process_impl.roll_and_window_partition_backward(grad_in, B, H, W, C, shift_size, window_size)
         return grad_out, None, None, None, None, None, None, None
 
@@ -92,5 +93,6 @@ class WindowProcessReverse(torch.autograd.Function):
 
         # grad_out = ctx.saved_tensors[0]
         # grad_out = torch.zeros((B, H, W, C), dtype=dtype).cuda()
+        grad_in = grad_in.contiguous()
         grad_out = _window_process_impl.window_merge_and_roll_backward(grad_in, B, H, W, C, shift_size, window_size)
         return grad_out, None, None, None, None, None, None, None

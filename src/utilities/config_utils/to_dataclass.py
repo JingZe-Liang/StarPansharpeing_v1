@@ -3,6 +3,7 @@ from typing import Any, Type, TypeVar
 
 from omegaconf import DictConfig, OmegaConf
 from typing_extensions import deprecated
+from dataclasses import asdict
 
 T = TypeVar("T")
 

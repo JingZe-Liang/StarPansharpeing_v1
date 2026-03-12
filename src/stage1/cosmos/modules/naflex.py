@@ -105,23 +105,30 @@ class GatedAttentionTimmWrapped(GatedAttention):
         norm_layer: Optional[Callable] = None,
         qk_norm: bool = False,
         scale_norm: bool = True,
+        proj_bias: bool = True,
         rotate_half: bool = False,
         is_causal: bool = False,
+        fused_rope=True,
+        use_te_dpa: bool = False,
+        te_qkv_format: str = "bshd",
         device=None,
         dtype=None,
     ):
         super().__init__(
-            dim,
-            num_heads,
-            num_heads,
-            norm_layer,
-            qk_norm,
-            qkv_bias,
+            hidden_size=dim,
+            num_attention_heads=num_heads,
+            num_key_value_heads=num_heads,
+            norm_layer=norm_layer,
+            use_qk_norm=qk_norm,
+            qkv_bias=qkv_bias,
             num_prefix_tokens=num_prefix_tokens,
             attention_dropout=attn_drop,
             headwise_attn_output_gate=True,
             elementwise_attn_output_gate=False,
             is_causal=is_causal,
+            fused_rope=fused_rope,
+            use_te_dpa=use_te_dpa,
+            te_qkv_format=te_qkv_format,
         )
 
 
@@ -161,6 +168,7 @@ class EvaLinearAttention(nn.Module):
         norm_layer: Optional[Callable] = None,
         qk_norm: bool = False,
         scale_norm: bool = True,
+        proj_bias: bool = True,
         rotate_half: bool = False,
         feature_map: str = "softmax",
         use_bf16: bool = True,
@@ -210,7 +218,7 @@ class EvaLinearAttention(nn.Module):
             eps=eps,
         )
         self.norm = norm_layer(attn_dim, **dd) if scale_norm else nn.Identity()
-        self.proj = nn.Linear(attn_dim, dim, **dd)
+        self.proj = nn.Linear(attn_dim, dim, bias=proj_bias, **dd)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(
@@ -279,6 +287,7 @@ class EvaSparseLinearAttention(nn.Module):
         norm_layer: Optional[Callable] = None,
         qk_norm: bool = False,
         scale_norm: bool = True,
+        proj_bias: bool = True,
         rotate_half: bool = False,
         topk: float = 0.25,
         feature_map: str = "softmax",
@@ -333,7 +342,7 @@ class EvaSparseLinearAttention(nn.Module):
             tie_feature_map_qk=tie_feature_map_qk,
         )
         self.norm = norm_layer(attn_dim, **dd) if scale_norm else nn.Identity()
-        self.proj = nn.Linear(attn_dim, dim, **dd)
+        self.proj = nn.Linear(attn_dim, dim, bias=proj_bias, **dd)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(
@@ -439,15 +448,133 @@ class _HC_EvaMLP(nn.Module):
         return self.drop_path(mlp_out)
 
 
+def _resolve_block_mlp_layer(
+    mlp_layer: str | type[nn.Module] | None,
+    swiglu_mlp: bool,
+) -> str | type[nn.Module]:
+    if mlp_layer in (None, Mlp) and swiglu_mlp:
+        return "swiglu"
+    if mlp_layer is None:
+        return Mlp
+    return mlp_layer
+
+
+def _build_block_mlp(
+    *,
+    mlp_layer: str | type[nn.Module],
+    dim: int,
+    hidden_features: int,
+    act_layer: type[nn.Module],
+    norm_layer: type[nn.Module],
+    scale_mlp: bool,
+    swiglu_align_to: int,
+    proj_bias: bool,
+    proj_drop: float,
+    depth: int,
+    num_heads: int,
+    device: torch.device | None,
+    dtype: torch.dtype | None,
+    extra_kwargs: dict[str, Any],
+) -> nn.Module:
+    dd: _DeviceDTypeKwargs = {"device": device, "dtype": dtype}
+
+    if mlp_layer == "swiglu":
+        if scale_mlp or swiglu_align_to:
+            return SwiGLU(
+                in_features=dim,
+                hidden_features=hidden_features,
+                norm_layer=norm_layer if scale_mlp else None,
+                bias=proj_bias,
+                drop=proj_drop,
+                align_to=swiglu_align_to,
+                **dd,
+            )
+
+        return GluMlp(
+            in_features=dim,
+            hidden_features=hidden_features * 2,
+            norm_layer=norm_layer if scale_mlp else None,
+            act_layer=nn.SiLU,
+            bias=proj_bias,
+            gate_last=False,
+            drop=proj_drop,
+            **dd,
+        )
+
+    if mlp_layer == "moe_megatron":
+        moe_kwargs = dict(extra_kwargs.get("moe", {}) or {})
+        from .moe.moe_megatron import MoEFFN
+
+        num_layers = moe_kwargs.pop("num_layers", None)
+        assert num_layers is not None
+        logger.debug(f"moe_megatron kwargs: {moe_kwargs}")
+
+        return MoEFFN(
+            dim=dim,
+            n_heads=num_heads,
+            mlp_ratio=hidden_features / dim,
+            num_layers=num_layers,
+            layer_idx=depth,
+            ffn_drop=proj_drop,
+            fused_type=None,
+            assume_bsh=True,
+            **moe_kwargs,
+        )
+
+    if mlp_layer == "moe_ds3":
+        from .moe.moe_gemm_ds3 import DeepSeekV3MoEGEMM
+
+        moe_kwargs = dict(extra_kwargs.get("moe", {}) or {})
+        for src_key, dst_key in (("topk", "top_k"), ("num_groups", "n_group"), ("top_k_group", "topk_group")):
+            if src_key in moe_kwargs and dst_key not in moe_kwargs:
+                moe_kwargs[dst_key] = moe_kwargs.pop(src_key)
+
+        aux_loss_free = bool(moe_kwargs.pop("aux_loss_free", False))
+        if aux_loss_free:
+            moe_kwargs = set_defaults(
+                moe_kwargs, dict(enable_expert_bias=True, use_seq_aux_loss=False, seq_aux_loss_coef=0.0)
+            )
+        moe_kwargs = set_defaults(
+            moe_kwargs,
+            dict(hidden_size=dim, intermediate_size=hidden_features, num_experts=8),
+        )
+        ds3_kwargs = extract_needed_kwargs(dict(moe_kwargs), DeepSeekV3MoEGEMM)
+        logger.debug(f"moe_ds3 kwargs: {ds3_kwargs}")
+
+        mlp = DeepSeekV3MoEGEMM(**ds3_kwargs)
+        if device is not None or dtype is not None:
+            mlp = mlp.to(device=device, dtype=dtype)
+        return mlp
+
+    if mlp_layer == "mlp":
+        mlp_layer = Mlp
+
+    if isinstance(mlp_layer, type) and issubclass(mlp_layer, nn.Module):
+        return mlp_layer(
+            in_features=dim,
+            hidden_features=hidden_features,
+            act_layer=act_layer,
+            norm_layer=norm_layer if scale_mlp else None,
+            bias=proj_bias,
+            drop=proj_drop,
+            **dd,
+        )
+
+    raise ValueError(f"Unsupported mlp_layer {mlp_layer}")
+
+
 class EvaBlock(nn.Module):
     def __init__(
         self,
         dim: int,
         num_heads: int,
+        qk_norm: bool = False,
         qkv_bias: bool = True,
         qkv_fused: bool = True,
         mlp_ratio: float = 4.0,
-        ffn_type: str | None = None,
+        proj_bias: bool = True,
+        qkv_bias_separate: bool = False,
+        mlp_layer: str | type[nn.Module] | None = None,
         swiglu_mlp: bool = False,  # legacy args
         swiglu_align_to: int = 0,
         scale_mlp: bool = False,
@@ -465,7 +592,7 @@ class EvaBlock(nn.Module):
         block_norm_type: Literal["pre", "post"] = "pre",
         is_causal: bool = False,
         v_residual: bool = False,
-        layer_idx: int | None = None,
+        depth: int = 0,
         hyperconnection_kwargs: dict[str, Any] | None = None,
         post_norm_alpha: float | None = None,
         post_norm_skip_first_layer: bool = True,
@@ -494,13 +621,29 @@ class EvaBlock(nn.Module):
             norm_layer: Normalization layer constructor
             attn_head_dim: Dimension of each attention head (if None, computed as dim // num_heads)
             v_residual: Whether to use value residual connections
-            layer_idx: Layer index for mHC initialization
+            depth: Layer index for initialization and mHC wiring
             hyperconnection_kwargs: Hyperconnection (mHC) configuration
         """
         dd: _DeviceDTypeKwargs = {"device": device, "dtype": dtype}
         super().__init__()
+        resolved_mlp_layer = _resolve_block_mlp_layer(mlp_layer, swiglu_mlp)
 
-        self.layer_idx = layer_idx
+        # print info
+        _logger = logger.bind(_name_="EVA config")
+        _logger.debug(
+            f"{depth=} \n"
+            f"{dim=}, {num_heads=} {attn_type=}, {qk_norm=}, {mlp_ratio=}, {qkv_bias=}, {qkv_fused=}, \n"
+            f"{proj_bias=}, {qkv_bias_separate=}, {attn_head_dim=}, {rotate_half=}, {is_causal=}, {v_residual=} \n"
+            f"norm_layer={norm_layer.__class__.__name__}, {resolved_mlp_layer=}, {swiglu_mlp=}, "
+            f"{swiglu_align_to=}, {scale_mlp=}, {scale_attn_inner=}, \n"
+            f"{init_values=}, {drop_path=}, {attn_drop=}, {proj_drop=}, {block_norm_type=}, "
+            f"{post_norm_alpha=}, {post_norm_skip_first_layer=}, \n"
+            f"{num_prefix_tokens=}, linear_attn={kwargs.get('linear_attn')}, "
+            f"sparse_linear_attn={kwargs.get('sparse_linear_attn')}, moe={kwargs.get('moe')} \n"
+            "---------------------------------------------"
+        )
+
+        self.layer_idx = depth
         self.v_residual = v_residual
         self.block_norm_type = block_norm_type
         assert block_norm_type in ["pre", "post"], f"block_norm_type must be 'pre' or 'post', got {block_norm_type}"
@@ -510,31 +653,40 @@ class EvaBlock(nn.Module):
             assert post_norm_alpha is not None, "post_norm_alpha must be provided for post-norm blocks"
 
         self.norm1 = norm_layer(dim, **dd)
-        logger.trace(f"Layer {self.__class__.__name__} uses attention type {attn_type}")
-        attn_cls = {
-            "rope": AttentionRope,
-            "eva": EvaAttention,
-            "gated": GatedAttentionTimmWrapped,
-            "linear": EvaLinearAttention,
-            "sparse_linear": EvaSparseLinearAttention,
-        }[attn_type]
+        attn_cls = cast(
+            Callable[..., nn.Module],
+            {
+                "rope": AttentionRope,
+                "eva": EvaAttention,
+                "gated": GatedAttentionTimmWrapped,
+                "linear": EvaLinearAttention,
+                "sparse_linear": EvaSparseLinearAttention,
+            }[attn_type],
+        )
 
         attn_kwargs = {}
         if attn_type == "gated":
-            attn_kwargs["is_causal"] = is_causal
+            attn_kwargs.update(is_causal=is_causal, proj_bias=proj_bias, qkv_bias_separate=qkv_bias_separate)
         elif attn_type == "linear":
+            attn_kwargs.update(proj_bias=proj_bias, qkv_bias_separate=qkv_bias_separate)
             linear_kwargs = kwargs.get("linear_attn")
             if linear_kwargs is not None:
                 attn_kwargs.update(linear_kwargs)
         elif attn_type == "sparse_linear":
+            attn_kwargs.update(proj_bias=proj_bias, qkv_bias_separate=qkv_bias_separate)
             sparse_linear_kwargs = kwargs.get("sparse_linear_attn")
             if sparse_linear_kwargs is not None:
                 attn_kwargs.update(sparse_linear_kwargs)
+        elif attn_type == "eva":
+            attn_kwargs.update(qkv_bias_separate=qkv_bias_separate)
+        elif attn_type == "rope":
+            attn_kwargs.update(proj_bias=proj_bias)
 
         # --------------- build Attention ------------- #
         self.attn = attn_cls(
             dim,
             num_heads=num_heads,
+            qk_norm=qk_norm,
             qkv_bias=qkv_bias,
             qkv_fused=qkv_fused,
             num_prefix_tokens=num_prefix_tokens,
@@ -553,84 +705,22 @@ class EvaBlock(nn.Module):
         # -------------- build MLP ----------------- #
         self.norm2 = norm_layer(dim, **dd)
         hidden_features = int(dim * mlp_ratio)
-        if swiglu_mlp or ffn_type == "swiglu":
-            if scale_mlp or swiglu_align_to:
-                # when norm in SwiGLU used or alignment enabled, an impl with separate fc for gate & x is used
-                self.mlp = SwiGLU(
-                    in_features=dim,
-                    hidden_features=hidden_features,
-                    norm_layer=norm_layer if scale_mlp else None,
-                    drop=proj_drop,
-                    align_to=swiglu_align_to,
-                    **dd,
-                )
-            else:
-                # w/o any extra norm, an impl with packed weights is used
-                self.mlp = GluMlp(
-                    in_features=dim,
-                    hidden_features=hidden_features * 2,
-                    norm_layer=norm_layer if scale_mlp else None,
-                    act_layer=nn.SiLU,
-                    gate_last=False,
-                    drop=proj_drop,
-                    **dd,
-                )
-
-        elif ffn_type == "moe_megatron":
-            moe_kwargs = dict(kwargs.get("moe", {}) or {})
-            from .moe.moe_megatron import MoEFFN
-
-            num_layers = moe_kwargs.pop("num_layers", None)  # this is hacky
-            assert num_layers is not None
-
-            self.mlp = MoEFFN(
-                dim=dim,
-                n_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                num_layers=num_layers,
-                layer_idx=layer_idx if layer_idx is not None else 0,
-                ffn_drop=proj_drop,
-                fused_type=None,
-                assume_bsh=True,
-                **moe_kwargs,
-            )
-
-        elif ffn_type == "moe_ds3":
-            moe_kwargs = dict(kwargs.get("moe", {}) or {})
-            from .moe.moe_gemm_ds3 import DeepSeekV3MoEGEMM
-
-            # alias
-            for src_key, dst_key in (("topk", "top_k"), ("num_groups", "n_group"), ("top_k_group", "topk_group")):
-                if src_key in moe_kwargs and dst_key not in moe_kwargs:
-                    moe_kwargs[dst_key] = moe_kwargs.pop(src_key)
-
-            aux_loss_free = bool(moe_kwargs.pop("aux_loss_free", False))
-            if aux_loss_free:
-                moe_kwargs = set_defaults(
-                    moe_kwargs, dict(enable_expert_bias=True, use_seq_aux_loss=False, seq_aux_loss_coef=0.0)
-                )
-            moe_kwargs = set_defaults(
-                moe_kwargs,
-                dict(hidden_size=dim, intermediate_size=hidden_features, num_experts=8),
-            )
-            ds3_kwargs = extract_needed_kwargs(moe_kwargs, DeepSeekV3MoEGEMM)
-
-            self.mlp = DeepSeekV3MoEGEMM(**ds3_kwargs)
-            if device is not None or dtype is not None:
-                self.mlp = self.mlp.to(device=device, dtype=dtype)
-
-        elif ffn_type == "mlp":
-            self.mlp = Mlp(
-                in_features=dim,
-                hidden_features=hidden_features,
-                act_layer=act_layer,
-                norm_layer=norm_layer if scale_mlp else None,
-                drop=proj_drop,
-                **dd,
-            )
-
-        else:
-            raise ValueError(f"Unsupported ffn_type {ffn_type}")
+        self.mlp = _build_block_mlp(
+            mlp_layer=resolved_mlp_layer,
+            dim=dim,
+            hidden_features=hidden_features,
+            act_layer=act_layer,
+            norm_layer=norm_layer,
+            scale_mlp=scale_mlp,
+            swiglu_align_to=swiglu_align_to,
+            proj_bias=proj_bias,
+            proj_drop=proj_drop,
+            depth=depth,
+            num_heads=num_heads,
+            device=device,
+            dtype=dtype,
+            extra_kwargs=kwargs,
+        )
 
         self.gamma_2 = nn.Parameter(init_values * torch.ones(dim, **dd)) if init_values is not None else None
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -660,7 +750,7 @@ class EvaBlock(nn.Module):
         self.hyperconnection_kwargs = hyperconnection_kwargs
         if hyperconnection_kwargs is not None:
             init_hc_fn = hyperconnection_kwargs.get("init_hc")
-            assert init_hc_fn is not None and layer_idx is not None, "init_hc and layer_idx required for mHC"
+            assert init_hc_fn is not None, "init_hc is required for mHC"
             init_hc_kwargs = dict(
                 mhc=hyperconnection_kwargs.get("mhc", False),
                 sinkhorn_iters=hyperconnection_kwargs.get("sinkhorn_iters", 10),
@@ -673,13 +763,13 @@ class EvaBlock(nn.Module):
             self.hc_attn = init_hc_fn(
                 dim=dim,
                 branch=_HC_EvaAttention(self.norm1, self.attn, self.gamma_1, self.drop_path1),
-                layer_index=layer_idx * 2,
+                layer_index=depth * 2,
                 **init_hc_kwargs,
             )
             self.hc_mlp = init_hc_fn(
                 dim=dim,
                 branch=_HC_EvaMLP(self.norm2, self.mlp, self.gamma_2, self.drop_path2),
-                layer_index=layer_idx * 2 + 1,
+                layer_index=depth * 2 + 1,
                 **init_hc_kwargs,
             )
 
@@ -760,17 +850,6 @@ def get_block_fn(cfg) -> Callable:
     or conflicting parameters pre-configured if needed.
     """
 
-    def _wrap_with_layer_idx(block_cls: type[nn.Module], **fixed_kwargs: Any) -> Callable:
-        layer_counter = {"idx": 0}
-
-        def _factory(*args: Any, **kwargs: Any) -> nn.Module:
-            if kwargs.get("layer_idx") is None:
-                kwargs["layer_idx"] = layer_counter["idx"]
-            layer_counter["idx"] += 1
-            return block_cls(*args, **fixed_kwargs, **kwargs)
-
-        return _factory
-
     # Check if we need EVA block features
     use_eva_features = (
         cfg.attn_type in ("eva", "rope", "gated", "linear", "sparse_linear")
@@ -785,26 +864,31 @@ def get_block_fn(cfg) -> Callable:
             attn_type = "rope"
 
         num_prefix_tokens = (1 if cfg.class_token else 0) + cfg.reg_tokens
+
         block_norm_type = "pre" if cfg.pre_norm else "post"
         post_norm_alpha = (
             cfg.post_norm_alpha
             if cfg.post_norm_alpha is not None
             else (cfg.depth * 2 if block_norm_type == "post" else None)
         )
-        return _wrap_with_layer_idx(
+
+        return partial(
             EvaBlock,
             attn_type=attn_type,
             swiglu_mlp=cfg.swiglu_mlp,
             scale_mlp=cfg.scale_mlp_norm,
             scale_attn_inner=cfg.scale_attn_inner_norm,
             qkv_fused=cfg.qkv_fused,
+            qkv_bias_separate=getattr(cfg, "qkv_bias_separate", False),
             num_prefix_tokens=num_prefix_tokens,
-            is_causal=getattr(cfg, "is_causal", False),  # despite the 'nepa' pretrained task, `is_causal` is False
             block_norm_type=block_norm_type,
             post_norm_alpha=post_norm_alpha,
             post_norm_skip_first_layer=cfg.post_norm_skip_first_layer,
+            is_causal=getattr(cfg, "is_causal", False),  # despite the 'nepa' pretrained task, `is_causal` is False
+            # block kwargs
             linear_attn=cfg.linear_attn,
             sparse_linear_attn=cfg.sparse_linear_attn,
+            moe=cfg.moe,
         )
     else:
         # Standard ViT block
@@ -820,6 +904,15 @@ def get_block_fn(cfg) -> Callable:
 
 
 naflexvit.get_block_fn = get_block_fn  # type: ignore
+
+
+def _normalize_cfg_for_timm_naflex(cfg: "NaFlexVitCfg") -> "NaFlexVitCfg":
+    if cfg.mlp_layer is not None and cfg.ffn_type is not None and cfg.mlp_layer != cfg.ffn_type:
+        logger.warning(f"Both mlp_layer={cfg.mlp_layer} and ffn_type={cfg.ffn_type} are set; using mlp_layer.")
+    elif cfg.mlp_layer is None and cfg.ffn_type is not None:
+        cfg.mlp_layer = cfg.ffn_type
+    return cfg
+
 
 # -------------- Naflex Config ------------------ #
 
@@ -843,16 +936,18 @@ class NaFlexVitCfg:
 
     # Attention parameters
     qkv_bias: bool = True
-    qk_norm: bool = True
+    qk_norm: bool = False
     proj_bias: bool = True
     attn_drop_rate: float = 0.0
     scale_attn_inner_norm: bool = False  # Apply scaling norm to attn context
-    linear_attn: dict[str, Any] | None = (
-        None  # kwargs for EvaLinearAttention (feature_map/use_bf16/tie_feature_map_qk/eps)
-    )
-    sparse_linear_attn: dict[str, Any] | None = (
-        None  # kwargs for EvaSparseLinearAttention (topk/feature_map/BLKQ/BLKK/use_bf16/tie_feature_map_qk)
-    )
+    qkv_bias_separate: bool = False
+    ffn_type: str | None = None
+    # kwargs for EvaLinearAttention (feature_map/use_bf16/tie_feature_map_qk/eps)
+    linear_attn: dict[str, Any] | None = None
+    # kwargs for EvaSparseLinearAttention (topk/feature_map/BLKQ/BLKK/use_bf16/tie_feature_map_qk)
+    sparse_linear_attn: dict[str, Any] | None = None
+    # kwargs for MoE MLP backends (for example moe_ds3 / moe_megatron)
+    moe: dict[str, Any] | None = None
 
     # Regularization
     init_values: Optional[float] = None  # Layer-scale init values (layer-scale enabled if not None)
@@ -1000,6 +1095,7 @@ def attention_init_fn(module, layer_id: int | None = None):
 
 class Transformer(NaFlexVit):
     def __init__(self, cfg: NaFlexVitCfg):
+        cfg = _normalize_cfg_for_timm_naflex(cfg)
         super().__init__(cfg, in_chans=cfg.in_chans, img_size=cfg.img_size)  # ty: ignore error[invalid-argument-type]
         self.cfg = cfg
         self._build_head(cfg)
@@ -1067,6 +1163,7 @@ class Transformer(NaFlexVit):
         act_layer = get_act_layer(cfg.act_layer) or nn.GELU
         dpr = calculate_drop_path_rates(cfg.drop_path_rate, cfg.depth)
         dd: _DeviceDTypeKwargs = {"device": None, "dtype": None}
+        mlp_layer = cfg.mlp_layer or Mlp
 
         new_blocks = nn.ModuleList()
         for i in range(cfg.depth):
@@ -1083,8 +1180,9 @@ class Transformer(NaFlexVit):
                 drop_path=dpr[i],
                 norm_layer=norm_layer,
                 act_layer=act_layer,
+                mlp_layer=mlp_layer,
                 v_residual=cfg.v_residual,
-                layer_idx=i,
+                depth=i,
                 hyperconnection_kwargs=hyperconnection_kwargs,
                 **dd,
             )
@@ -1299,9 +1397,9 @@ class Transformer(NaFlexVit):
 
         if isinstance(x, dict):
             # Handle dictionary input from NaFlex collator
-            patch_coord = x["patch_coord"]
-            patch_valid = x["patch_valid"]
-            patches = x["patches"]
+            patch_coord = x["patch_coord"]  # ty: ignore[invalid-argument-type]
+            patch_valid = x["patch_valid"]  # ty: ignore[invalid-argument-type]
+            patches = x["patches"]  # ty: ignore[invalid-argument-type]
         else:
             patches = x
             height, width = x.shape[-2:]
@@ -1412,7 +1510,7 @@ class Transformer(NaFlexVit):
             p.div_(math.sqrt(2.0 * layer_id))
 
         # Rescale the depth
-        rescale_layer = True
+        rescale_layer = False
         if rescale_layer:
             for layer_id, blk in enumerate(self.blocks, 1):
                 rescale(blk.attn.proj.weight.data, layer_id)
@@ -1473,6 +1571,7 @@ class IJEPANaFlexViT(Transformer):
                     norm_layer=norm_layer,
                     act_layer=act_layer,
                     mlp_layer=mlp_layer,
+                    depth=i,
                     **dd,
                 )
                 for i in range(mae_decoder_depth)
@@ -1836,15 +1935,15 @@ class IJEPANaFlexViT(Transformer):
 
             if isinstance(x, dict):
                 # Handle dictionary input from NaFlex collator, dict inputs take priority over args
-                patches = x["patches"]
+                patches = x["patches"]  # ty: ignore[invalid-argument-type]
                 if "patch_valid" in x:
-                    patch_valid = x["patch_valid"]
+                    patch_valid = x["patch_valid"]  # ty: ignore[invalid-argument-type]
 
                 if "patch_coord" in x:
-                    patch_coord = x["patch_coord"]
+                    patch_coord = x["patch_coord"]  # ty: ignore[invalid-argument-type]
 
                 if "attn_mask" in x:
-                    attn_mask = x["attn_mask"]
+                    attn_mask = x["attn_mask"]  # ty: ignore[invalid-argument-type]
             else:
                 patches = x
             assert patch_coord is not None, "patch_coord is required in naflex mode"

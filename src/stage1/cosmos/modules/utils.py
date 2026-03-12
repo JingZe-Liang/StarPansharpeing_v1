@@ -27,7 +27,7 @@ import torch.nn as nn
 from einops import pack, rearrange, unpack
 from loguru import logger
 from timm.layers import create_norm, create_norm_layer
-from timm.layers.norm import LayerNorm2d
+from timm.layers.norm import LayerNorm2d, RmsNorm2d
 
 from src.utilities.config_utils import once
 

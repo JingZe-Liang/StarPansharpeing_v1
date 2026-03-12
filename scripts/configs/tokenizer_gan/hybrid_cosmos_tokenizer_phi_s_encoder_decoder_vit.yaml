@@ -1,13 +1,12 @@
 defaults:
   # tokenizer ==========
-  - dataset: unified_hyperspectral # [hyperspectral, unified_hyperspectral]
+  - dataset: litdata_one_loader # [hyperspectral, unified_hyperspectral]
   - tokenizer: cosmos_hybrid_phi_s_encoder_decoder_vit
   - quantizer: quant
-  - proxy_task: ijepa
+  # - proxy_task: ijepa
   - accelerator: base
   - vq_loss: remote_clip_RN50
   # self ============
-  - hydra: base
   - _self_
 
   # hydra overrides ====
@@ -24,37 +23,37 @@ accelerator:
     _target_: accelerate.utils.GradientAccumulationPlugin
     num_steps: 1
 
-proxy_task:
-  task: ["ijepa"]
-  loss_weights:
-    ijepa: 1.0
-  ijepa:
-    model:
-      embed_dim: ${tokenizer.trans_enc_cfg.embed_dim}
-    optimizer:
-      _target_: torch.optim.AdamW
-      _partial_: true
-      lr: 3.0e-4
-      weight_decay: 1.0e-5
-      eps: 1.0e-8
-      betas: [0.95, 0.99]
-      foreach: true
-    scheduler:
-      _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
-      _partial_: true
-      num_warmup_steps: 500
-      num_training_steps: ${train.max_steps}
-      num_cycles: 1
-      reduced_factor: 2
-      min_lr: 1.0e-5
+# proxy_task:
+#   task: ["ijepa"]
+#   loss_weights:
+#     ijepa: 1.0
+#   ijepa:
+#     model:
+#       embed_dim: ${tokenizer.trans_enc_cfg.embed_dim}
+#     optimizer:
+#       _target_: torch.optim.AdamW
+#       _partial_: true
+#       lr: 3.0e-4
+#       weight_decay: 1.0e-5
+#       eps: 1.0e-8
+#       betas: [0.95, 0.99]
+#       foreach: true
+#     scheduler:
+#       _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+#       _partial_: true
+#       num_warmup_steps: 500
+#       num_training_steps: ${train.max_steps}
+#       num_cycles: 1
+#       reduced_factor: 2
+#       min_lr: 1.0e-5
 
 tokenizer:
   cnn_cfg:
     use_repa_loss: true # keep true to build Phi-S student projection heads
     use_vf_loss: false
-    quantizer_type: null
+    quantizer_type: kl
   trans_enc_cfg:
-    pretrained_type: ["ijepa"]
+    pretrained_type: #["ijepa"]
   distillation_cfg:
     phis_student_source: semantic
     semantic_feature_dim: 1024
@@ -68,6 +67,8 @@ tokenizer:
       pe:
         low_level_out_dim: 1024
         semantic_out_dim: 1024
+    decoder_ul_lambda0: 5.0
+    decoder_use_ul_noisy_latent: false
 
 vq_loss:
   disc_in_channels: 512
@@ -75,7 +76,7 @@ vq_loss:
   perceptual_weight: 0.0
   reconstruction_loss_type: mse
   reconstruction_weight: 1.0
-  ssim_weight: 0.0
+  ssim_weight: 0.1
 
   # disable repa/vf/gram/sem-distill
   repa_loss_weight:
@@ -84,7 +85,8 @@ vq_loss:
   gram_loss_weight:
 
   # Phi-S multi-teacher distillation
-  phis_loss_weight: 0.1
+  phis_start_for_g: 0
+  phis_loss_weight: 0.4
   phis_loss_options:
     phi_cache_path: runs/phi_s_cache/phi_s_buffer.pt
     phi_cache_required: true
@@ -127,47 +129,91 @@ vq_loss:
       siglip2: 0.33
       pe: 0.33
 
+  # diffusion prior regularization
+  diffusion_start_for_g: 0
+  diffusion_loss_weight: 0.0
+  diffusion_loss_options:
+    lambda0: 5.0
+    end_logsnr: -15.0
+    schedule: linear_logsnr_vp
+    time_sample_type: uniform
+    include_terminal_kl: false
+
   # disable GAN
-  disc_network_type: none
+  disc_network_type: patchgan
   disc_weight: 0.0
   disc_start_for_g: 0
   disc_start_for_d: 0
   disc_loss: relative
 
-  # diffusion prior (off by default)
-  diffusion_loss_weight:
-  diffusion_loss_options: {}
-
   # quantizer loss
-  quantizer_type:
+  quantizer_type: kl
   quantizer_options:
+    kl_weight: 1.0e-6
 
   # extra losses off
   lecam_loss_weight:
   lcr_loss_weight:
 
 ema:
+  _target_: ema_pytorch.EMA
+  _partial_: true
   beta: 0.999
   update_after_step: 0
   update_every: 2
+  use_foreach: true
+  allow_different_devices: true
+
+diffusion_reg: null
+  # model:
+  #   _target_: src.stage1.self_supervised.generative_prior_loss.model.SelfFlowDiT
+  #   input_size: 32
+  #   patch_size: 2
+  #   in_channels: 32
+  #   hidden_size: 1024
+  #   depth: 4
+  #   num_heads: 16
+  #   mlp_ratio: 4.0
+  #   num_classes: 1
+  #   learn_sigma: false
+  #   has_condition: false
+  #   compatibility_mode: false
+  #   act_checkpoint: true
+  # optimizer:
+  #   _target_: torch.optim.AdamW
+  #   _partial_: true
+  #   lr: 3.0e-4
+  #   weight_decay: 1.0e-4
+  #   betas: [0.9, 0.95]
+  #   eps: 1.0e-8
+  #   foreach: true
+  # scheduler:
+  #   _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+  #   _partial_: true
+  #   num_warmup_steps: 1000
+  #   num_training_steps: ${train.max_steps}
+  #   num_cycles: 1
+  #   reduced_factor: 2
+  #   min_lr: 1.0e-6
 
 train:
   tokenizer_name: hybrid_cosmos_phi_s_encdec_vit_f8c${tokenizer.cnn_cfg.model.latent_channels}p${tokenizer.cnn_cfg.model.patch_size}
   proj_dir: null
   finetune_strategy: finetune_all
-  max_grad_norm: 0.08
+  max_grad_norm: 3.0
   track_metrics: false
   track_metrics_duration: -1
   track_metrics_after: 2000
   visualize_every: 200
   max_steps: 1_000_000
   save_every: 1000
-  resume_path:
+  resume_path: runs/stage1_cosmos_hybrid_enc_dec/2026-03-08/17-41-05_phi_s_encdec_vit_ijepa_litdata_one_loader_diff_loss_reg/checkpoints/checkpoint_61
   ema_load_path:
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
   grad_check: false
+  grad_checkpoint: true
   proxy_task_train_type: unified
 
   # augmentations
@@ -183,15 +229,22 @@ train:
     _partial_: true
     betas: [0.9, 0.95]
     mu: 0.95
-    oned_param_algo: lion
+    oned_param_algo: adamw
     use_triton: true
-    use_preconditioned: true # turbo-muon style preconditioning
+    use_preconditioned: false # turbo-muon style preconditioning
     muon_params_defaults:
       lr: 4.0e-4
-      weight_decay: 0.02
+      weight_decay: 0.1
     oned_params_defaults:
-      lr: 4.0e-4
-      weight_decay: 0.02
+      lr: 2.0e-4
+      weight_decay: 0.0
+    # _target_: torch.optim.AdamW
+    # _partial_: true
+    # lr: 4.0e-4
+    # weight_decay: 0
+    # eps: 1.0e-8
+    # betas: [0.95, 0.99]
+    # foreach: true
 
   disc_optimizer:
     _target_: torch.optim.AdamW
@@ -205,7 +258,7 @@ train:
   tokenizer_sched:
     _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
     _partial_: true
-    num_warmup_steps: 1000
+    num_warmup_steps: 0
     num_training_steps: ${train.max_steps}
     num_cycles: 1
     reduced_factor: 2
@@ -221,19 +274,14 @@ train:
     reduced_factor: 2
     min_lr: 1.0e-5
 
-  # diffusion denoiser branch (only used when vq_loss.diffusion_loss_weight > 0)
-  diffusion:
-    model:
-    optimizer:
-    scheduler:
-
   log:
-    run_comment: phi_s_encdec_vit_ijepa_${dataset.used}
+    run_comment: phi_s_encdec_vit_ijepa_${dataset.used}_diff_loss_reg
     log_with_time: True
     visualize_every: 500
     log_every: 10
+    log_with: ['tensorboard']
 
-  debug: true
+  debug: false
 
 val:
   val_duration: 1000

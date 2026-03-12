@@ -4,7 +4,7 @@ RMSNorm + SwiGLU + EVA attention with Rope.
 """
 
 from dataclasses import asdict, dataclass
-from typing import Any, List, Literal, Optional, Union, cast
+from typing import Any, Literal, cast
 
 import accelerate
 import numpy as np
@@ -14,16 +14,18 @@ import torch.nn.functional as F
 from easydict import EasyDict as edict
 from einops import rearrange
 from loguru import logger
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from timm.layers import create_conv2d, create_norm_act_layer
 from torch import Tensor
 from typing_extensions import Annotated
 
 from src.utilities.config_utils import (
-    dataclass_from_dict,
+    dataclass_to_dict_config,
     function_config_to_basic_types,
     function_config_to_easy_dict,
     set_defaults,
+    to_easydict_recursive,
+    to_object_recursive,
 )
 from src.utilities.network_utils.network_loading import load_weights_with_shape_check
 
@@ -48,8 +50,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     z: Tensor | list[Tensor] | None = None
     # repa/phi-s projections
     sem_z: Tensor | list[Tensor] | None = None
-    supported_cached_hiddens: List[str] = ["z", "sem_z"]
-    cache_layers: dict[str, list[int]] = {
+    supported_cached_hiddens: list[str] = ["z", "sem_z"]
+    cache_layers: dict[str, int | list[int]] = {
         "low_level": [0, 1, 2, -1],  # -1 means middle layer
         "semantic": [2, 5, 8, 11],  # 12 layers of encoder
     }
@@ -57,29 +59,38 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     _semantic_feature_dim: int = 1152
     sem_repa_proj_is_multi_layer_cached: bool = False
     sem_repa_proj_is_multi_layer_cached_by_teacher: dict[str, bool] = {}
+    quantize_encode_infer: str | None = None
 
     def __init__(
         self,
-        cnn_cfg: ContinuousTokenizerConfig,
-        trans_enc_cfg: NaFlexVitCfg,
-        trans_dec_cfg: Optional[NaFlexVitCfg] = None,
-        *,
-        cnn_enc_cfg: EncoderDecoderConfig | None = None,
-        cnn_dec_cfg: EncoderDecoderConfig | None = None,
-        distillation_cfg: dict[str, Any] = {},
-        hybrid_tokenizer_cfg: dict[str, Any] = {},
+        cnn_cfg: ContinuousTokenizerConfig | DictConfig,
+        trans_enc_cfg: NaFlexVitCfg | DictConfig,
+        trans_dec_cfg: NaFlexVitCfg | DictConfig | None = None,
+        cnn_enc_cfg: EncoderDecoderConfig | DictConfig | None = None,
+        cnn_dec_cfg: EncoderDecoderConfig | DictConfig | None = None,
+        distillation_cfg: DictConfig | None = None,
+        hybrid_tokenizer_cfg: DictConfig | None = None,
     ):
+        self.z = None
+        self.sem_z = None
+        self.supported_cached_hiddens = list(type(self).supported_cached_hiddens)
+        self.cache_layers = type(self).cache_layers.copy()
+        self.low_lvl_repa_proj_chans = []
+        self.sem_repa_proj_is_multi_layer_cached = False
+        self.sem_repa_proj_is_multi_layer_cached_by_teacher = {}
+        self.quantize_encode_infer = None
+        assert self.quantize_encode_infer in ("h_fp8", "h_nf4", "", "h_bf16", None)
+
         self.cnn_cfg = cnn_cfg
         self.trans_enc_cfg = trans_enc_cfg
         self.trans_dec_cfg = trans_dec_cfg
         self.distillation_cfg = distillation_cfg
         self.grad_checkpointing = self.cnn_cfg.model.act_checkpoint
-
         self.latent_channels = self.cnn_cfg.model.latent_channels
 
         ###### Distillation configs
         self.distillation_cfg = set_defaults(
-            distillation_cfg,
+            distillation_cfg or edict(),
             {
                 # single teacher
                 "dino_feature_dim": 1024,
@@ -94,7 +105,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         # single teacher
         self._dino_feature_dim = self.distillation_cfg.dino_feature_dim
         self._semantic_feature_dim = self.distillation_cfg.semantic_feature_dim
-        self.cache_layers = self.distillation_cfg.cache_layers
+        self.cache_layers = to_object_recursive(self.distillation_cfg.cache_layers)
 
         # multiple teachers
         self._teacher_proj_dims: dict[str, dict[str, int]] = {
@@ -106,7 +117,6 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         }
         self._teacher_names: list[str] = list(self._teacher_proj_dims.keys())
         self._use_multi_teacher_proj = len(self._teacher_names) > 0
-        self._legacy_multi_teacher_warned = False
         self.phis_student_source: Literal["semantic", "low_level"] = cast(
             Literal["semantic", "low_level"],
             getattr(self.distillation_cfg, "phis_student_source", "semantic"),
@@ -118,16 +128,20 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         ###### Deep supervision configs
         self.hybrid_tokenizer_cfg = set_defaults(
-            hybrid_tokenizer_cfg,
+            hybrid_tokenizer_cfg or edict(),
             {
                 "deep_supervision_type": None,
                 "latent_bottleneck_type": "after_semantic",
                 "latent_straight_through_skip": False,
+                "decoder_use_ul_noisy_latent": False,
+                "decoder_ul_lambda0": 5.0,  # unified latent paper uses 5.0
             },
         )
         # deep_supervision_type: [direct_out, sum_previous_out]
         self.deep_supervision_type = self.hybrid_tokenizer_cfg.deep_supervision_type
         self.latent_bottleneck_type = self.hybrid_tokenizer_cfg.latent_bottleneck_type
+        self.decoder_use_ul_noisy_latent = bool(self.hybrid_tokenizer_cfg.decoder_use_ul_noisy_latent)
+        self.decoder_ul_lambda0 = float(self.hybrid_tokenizer_cfg.decoder_ul_lambda0)
         self._is_deep_supervision = self.deep_supervision_type is not None
         self._build_deep_supervised_heads(cnn_cfg)
 
@@ -135,11 +149,13 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         if cnn_enc_cfg is not None or cnn_dec_cfg is not None:
             # If the encoder or decoder config is provided, use it
             build_enc_dec_kwargs = edict(enc_cnn_model_cfg=cnn_enc_cfg, dec_cnn_model_cfg=cnn_dec_cfg)
-        super().__init__(self.cnn_cfg, build_enc_dec_kwargs=build_enc_dec_kwargs)
+
+        super().__init__(self.cnn_cfg, build_enc_dec_kwargs=build_enc_dec_kwargs)  # type: ignore[arg-type]
 
         ##### Transformer models
         self._build_transformers(cnn_cfg, trans_enc_cfg, trans_dec_cfg)
         self._build_straight_through_skip(self.hybrid_tokenizer_cfg, cnn_cfg)
+        self._validate_ul_noisy_decoder_init_constraints()
 
         ### Loading pretrained models
         if self.cnn_cfg.loading_type == "hybrid_pretrained":
@@ -157,20 +173,20 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
     def _build_encoder_decoder(
         self,
-        cfg: ContinuousTokenizerConfig,
-        model_cfg: EncoderDecoderConfig,
+        cfg,
+        model_cfg,
         *,
-        enc_cnn_model_cfg: EncoderDecoderConfig | None = None,
-        dec_cnn_model_cfg: EncoderDecoderConfig | None = None,
+        enc_cnn_model_cfg=None,
+        dec_cnn_model_cfg=None,
     ):
         self._is_diffbands = isinstance(model_cfg.in_channels, (tuple, list))
 
-        enc_kwargs = dec_kwargs = asdict(model_cfg)
+        enc_kwargs = dec_kwargs = model_cfg
         if enc_cnn_model_cfg is not None:
-            enc_kwargs = asdict(enc_cnn_model_cfg)
+            enc_kwargs = enc_cnn_model_cfg
             logger.info("[Build CNN Encoder]: override cnn encoder config.")
         if dec_cnn_model_cfg is not None:
-            dec_kwargs = asdict(dec_cnn_model_cfg)
+            dec_kwargs = dec_cnn_model_cfg
             logger.info("[Build CNN Decoder]: override cnn decoder config.")
 
         encoder = Encoder(**enc_kwargs)
@@ -186,8 +202,8 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
     def _set_low_level_proj_chans(self):
         cache_index = self.cache_layers["low_level"]
+        self.low_lvl_repa_proj_chans = []
         if not isinstance(cache_index, list):
-            self.low_lvl_repa_proj_chans = []
             return
 
         # low-level repa proj channels
@@ -218,14 +234,14 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         if trans_dec_cfg is not None and trans_dec_cfg.pretrained_type is not None:
             dec_model_cls = IJEPANaFlexViT
 
-        self.semantic_enc_transformer = enc_model_cls(self.trans_enc_cfg)
+        self.semantic_enc_transformer = enc_model_cls(self.trans_enc_cfg)  # type: ignore[arg-type]
         self.semantic_enc_transformer.set_grad_checkpointing(self.grad_checkpointing)
         logger.info(f"Init semantic transformer encoder.")
 
         self.semantic_transformer_dec = None
         self.st_skip_sem_decoder = False
         if trans_dec_cfg is not None:
-            self.semantic_transformer_dec = dec_model_cls(self.trans_dec_cfg)
+            self.semantic_transformer_dec = dec_model_cls(trans_dec_cfg)
             self.semantic_transformer_dec.set_grad_checkpointing(self.grad_checkpointing)
             logger.info(f"Init semantic transformer decoder.")
 
@@ -254,6 +270,35 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 f"Will skip the latent through the cat conv without semantic decoder, "
                 "maybe better for reconstruction, <yellow>Experimenting</yellow>"
             )
+
+    def _validate_ul_noisy_decoder_init_constraints(self) -> None:
+        if not self.decoder_use_ul_noisy_latent:
+            return
+        if self.st_skip_sem_decoder:
+            raise ValueError(
+                "UL noisy decoder does not support `latent_straight_through_skip=True`; "
+                "the skip branch would leak the clean latent to the decoder."
+            )
+        if self.dual_latent_branch:
+            raise ValueError(
+                "UL noisy decoder does not support dual/mixed latents; "
+                "the decoder condition is no longer a single compact latent aligned with the prior."
+            )
+
+    def _sample_ul_noisy_latent(self, latent_clean: Tensor) -> Tensor:
+        alpha0 = torch.sqrt(torch.sigmoid(torch.tensor(self.decoder_ul_lambda0, device=latent_clean.device)))
+        sigma0 = torch.sqrt(torch.sigmoid(torch.tensor(-self.decoder_ul_lambda0, device=latent_clean.device)))
+        alpha0 = alpha0.to(dtype=latent_clean.dtype)
+        sigma0 = sigma0.to(dtype=latent_clean.dtype)
+        return alpha0 * latent_clean + sigma0 * torch.randn_like(latent_clean)
+
+    def _prepare_single_decoder_latent_inputs(self, latent: Tensor) -> dict[str, Tensor | bool]:
+        decoder_latent = self._post_quantize_latent_for_transmission(latent)
+        return {
+            "to_dec": decoder_latent,
+            "to_dec_clean": decoder_latent,
+            "to_dec_is_dual_latent": False,
+        }
 
     def _build_deep_supervised_heads(self, cnn_cfg):
         if not self._is_deep_supervision:
@@ -294,7 +339,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             self.deep_supervised_heads.append(to_out)
         logger.info(f"Build deep supervised heads with type: {deep_sup_type}")
 
-    def load_pretrained(self, uni_tokenizer_path: str, _reinit_quant_convs=False, **kwargs):  # type: ignore[invalid-method-override]
+    def load_pretrained(self, uni_tokenizer_path: str | None, _reinit_quant_convs=False, **kwargs):
         """Init the model from the pretrained only CNN weights."""
         if uni_tokenizer_path in (None, ""):
             logger.warning(f"No pretrained weights found at {uni_tokenizer_path}, skip loading ckpt.")
@@ -305,6 +350,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         if len(missing_ks) > 0 or len(unexp_ks) > 0:
             logger.warning(f"Missing keys: {missing_ks}, Unexpected keys: {unexp_ks}")
 
+        # Do not use it.
         if _reinit_quant_convs:
             # Init the quant convs for latent min/max value not too large
             nn.init.trunc_normal_(self.encoder.quant_conv.weight, std=0.01)
@@ -476,7 +522,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             h = z_low_lvl
             h = self.latent_aug(h)
 
-        tokens = self.semantic_enc_transformer.forward_features(h)  # type: ignore[arg-type]
+        tokens = self.semantic_enc_transformer.forward_features(h)
         tokens = cast(torch.Tensor, tokens)
         if getattr(self.semantic_enc_transformer, "num_prefix_tokens", 0) <= 0:
             raise ValueError("semantic_enc_transformer has no cls token, set `class_token: true` in config")
@@ -614,13 +660,18 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         # Do cache here
         self.z = cache_low_lvl  # [b, c, h, w]
         self.sem_z = cache_semantic
-        enc_out.update(low_lvl_z=cache_low_lvl, sem_z=cache_semantic, latent_before_quantizer=z_semantic)
         enc_out.update(
+            low_lvl_z=cache_low_lvl,
+            sem_z=cache_semantic,
+            latent_before_quantizer=z_semantic,
             latent=quant_branch_out.latent,
             q_loss=quant_branch_out.q_loss,
             q_loss_breakdown=quant_branch_out.q_loss_breakdown,
             latent_is_dual=quant_branch_out.latent_is_dual,
         )
+        for key in ("latent_mean", "latent_logvar", "latent_mode"):
+            if hasattr(quant_branch_out, key):
+                enc_out[key] = getattr(quant_branch_out, key)
 
         if quant_branch_out.latent_is_dual:
             enc_out.update(
@@ -634,7 +685,11 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 to_dec_quant_keep_mask=quant_branch_out.quant_keep_mask,
             )
         else:
-            enc_out.update(to_dec=quant_branch_out.latent, to_dec_is_dual_latent=False)
+            enc_out.update(self._prepare_single_decoder_latent_inputs(quant_branch_out.latent))
+
+        # for transmission only in eval
+        if bool(enc_out.get("to_dec_is_dual_latent", False)):
+            enc_out.to_dec = self._post_quantize_latent_for_transmission(enc_out.to_dec)
 
         return enc_out
 
@@ -668,6 +723,10 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             latent=quant_branch_out.latent,
             latent_is_dual=quant_branch_out.latent_is_dual,
         )
+        for key in ("latent_mean", "latent_logvar", "latent_mode"):
+            if hasattr(quant_branch_out, key):
+                enc_out[key] = getattr(quant_branch_out, key)
+
         if quant_branch_out.latent_is_dual:
             enc_out.update(
                 latent_quant=quant_branch_out.latent_quant,
@@ -679,6 +738,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 latent_cont=quant_branch_out.latent_cont,
                 quant_keep_mask=quant_branch_out.quant_keep_mask,
             )
+            h = self._post_quantize_latent_for_transmission(h)
             # In dual-branch mode, use mixed latent as the public latent for downstream losses/logging.
             enc_out["latent"] = h
             enc_out["latent_mixed"] = h
@@ -687,6 +747,13 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                 enc_out.h_skipped = h_skipped  # z_dim
         else:
             h = quant_branch_out.latent
+            h = self._post_quantize_latent_for_transmission(h)
+            if self.decoder_use_ul_noisy_latent:
+                latent_clean = h
+                latent_noisy = self._sample_ul_noisy_latent(latent_clean)
+                enc_out.latent_clean = latent_clean
+                enc_out.latent_noisy = latent_noisy
+                h = latent_noisy
             ##### Do post-quant conv
             if self.st_skip_sem_decoder:
                 h = self.decoder.quant_conv["post_quant_conv"](h)  # sent to semantic encoder
@@ -761,15 +828,15 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
     def decode(
         self,
         inp: dict,
-        inp_shape: Annotated[Union[torch.Size, int, tuple], "bs,c,h,w or bs,c or c"],
+        inp_shape: Annotated[torch.Size | int | tuple, "bs,c,h,w or bs,c or c"],
         clamp=False,
     ) -> dict:
         """
         Decode the latent into the corresponding channels image.
-        Output the latent, to_dec, q_loss, q_loss_breakdown, recon, deep_supervision_outputs (optional)
-        """
+        Output the latent, to_dec, q_loss, q_loss_breakdown, recon, deep_supervision_outputs (optional)"""
         out_d = edict(**inp)  # quantization-related, to_dec, latent
         h = inp["to_dec"]
+        latent_clean = inp.get("to_dec_clean")
         to_dec_is_z = bool(inp.get("to_dec_is_z", False))
 
         if bool(inp.get("to_dec_is_dual_latent", False)):
@@ -785,6 +852,13 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             # Keep `latent` aligned with the mixed decoder input in dual-branch mode.
             out_d.latent = h
             out_d.latent_mixed = h
+
+        if latent_clean is not None and self.decoder_use_ul_noisy_latent:
+            assert torch.is_tensor(latent_clean), "`to_dec_clean` should be a tensor when UL noisy decoder is enabled."
+            latent_noisy = self._sample_ul_noisy_latent(latent_clean)
+            out_d.latent_clean = latent_clean
+            out_d.latent_noisy = latent_noisy
+            h = latent_noisy
 
         # Decoder
         chan = inp_shape[1] if isinstance(inp_shape, (torch.Size, tuple)) else inp_shape
@@ -852,36 +926,40 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
         return deep_sup_outputs
 
     @classmethod
-    @function_config_to_basic_types
     def create_model(
         cls,
         cnn_cfg,
         trans_enc_cfg,
         trans_dec_cfg=None,
-        distillation_cfg: dict | None = None,
-        hybrid_tokenizer_cfg: dict | None = None,
+        distillation_cfg=None,
+        hybrid_tokenizer_cfg=None,
         # overrides for the main cnn_cfg, if None, use the default values
         # in cnn_cfg
-        cnn_enc_cfg: dict | None = None,
-        cnn_dec_cfg: dict | None = None,
+        cnn_enc_cfg=None,
+        cnn_dec_cfg=None,
     ):
-        cnn_cfg = dataclass_from_dict(ContinuousTokenizerConfig, cnn_cfg)
-        trans_enc_cfg = dataclass_from_dict(NaFlexVitCfg, trans_enc_cfg)
-        if trans_dec_cfg is not None:
-            trans_dec_cfg = dataclass_from_dict(NaFlexVitCfg, trans_dec_cfg)
-        if cnn_enc_cfg is not None:
-            cnn_enc_cfg = dataclass_from_dict(EncoderDecoderConfig, cnn_enc_cfg)
-        if cnn_dec_cfg is not None:
-            cnn_dec_cfg = dataclass_from_dict(EncoderDecoderConfig, cnn_dec_cfg)
+        def _merge_cfg(base_cfg_cls: type[Any], override_cfg: dict | DictConfig | None):
+            cfg_base = dataclass_to_dict_config(base_cfg_cls)
+            if override_cfg is None:
+                merged_cfg = OmegaConf.create(cfg_base)
+            else:
+                merged_cfg = OmegaConf.merge(cfg_base, override_cfg)
+            return to_easydict_recursive(OmegaConf.to_container(merged_cfg, resolve=True))
+
+        cont_tok_cfg = _merge_cfg(ContinuousTokenizerConfig, cnn_cfg)
+        trans_enc_cfg = _merge_cfg(NaFlexVitCfg, trans_enc_cfg)
+        trans_dec_cfg = _merge_cfg(NaFlexVitCfg, trans_dec_cfg) if trans_dec_cfg is not None else None
+        cnn_enc_cfg = _merge_cfg(EncoderDecoderConfig, cnn_enc_cfg) if cnn_enc_cfg is not None else None
+        cnn_dec_cfg = _merge_cfg(EncoderDecoderConfig, cnn_dec_cfg) if cnn_dec_cfg is not None else None
 
         return cls(
-            cnn_cfg,
+            cont_tok_cfg,
             trans_enc_cfg,
             trans_dec_cfg,
             cnn_enc_cfg=cnn_enc_cfg,
             cnn_dec_cfg=cnn_dec_cfg,
-            distillation_cfg=edict(distillation_cfg),
-            hybrid_tokenizer_cfg=edict(hybrid_tokenizer_cfg),
+            distillation_cfg=distillation_cfg,
+            hybrid_tokenizer_cfg=hybrid_tokenizer_cfg,
         )
 
     def _should_project_repa_features(self, force_to: bool = False) -> bool:
@@ -1004,12 +1082,11 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             return None
 
         primary_teacher = self._teacher_names[0]
-        if not self._legacy_multi_teacher_warned:
-            logger.warning(
-                f"[Repa proj]: get_repa_feature() is using primary teacher '{primary_teacher}' in multi-teacher mode. "
-                "Please switch to get_repa_feature_dict() for all teachers."
-            )
-            self._legacy_multi_teacher_warned = True
+        logger.warning(
+            f"[Repa proj]: get_repa_feature() is using primary teacher '{primary_teacher}' in multi-teacher mode. "
+            "Please switch to get_repa_feature_dict() for all teachers.",
+            warn_once=True,
+        )
         return multi_feats[primary_teacher]
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
@@ -1044,24 +1121,27 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
             return
 
         # Low-level projection
-        self.low_lvl_repa_proj_is_multi = isinstance(self.cache_layers["low_level"], (tuple, list))
+        low_level_cache_layers = self.cache_layers["low_level"]
+        self.low_lvl_repa_proj_is_multi = isinstance(low_level_cache_layers, list)
         if self.low_lvl_repa_proj_is_multi:
-            assert len(self.low_lvl_repa_proj_chans) == len(self.cache_layers["low_level"]), (
+            assert isinstance(low_level_cache_layers, list)
+            assert len(self.low_lvl_repa_proj_chans) == len(low_level_cache_layers), (
                 f"Length of low_lvl_repa_proj_chans {len(self.low_lvl_repa_proj_chans)} "
                 f"should match length of cached low level layers "
-                f"{len(self.cache_layers['low_level'])}"
+                f"{len(low_level_cache_layers)}"
             )
 
         sem_cache_layers = self.cache_layers["semantic"]
-        self.sem_repa_proj_is_multi_layer_cached = isinstance(sem_cache_layers, (tuple, list))
+        self.sem_repa_proj_is_multi_layer_cached = isinstance(sem_cache_layers, list)
         self.sem_repa_proj_is_multi_layer_cached_by_teacher = {}
 
         def _build_low_level_proj(out_dim: int) -> nn.Module:
             if not self.low_lvl_repa_proj_is_multi:
                 return build_mlp(self.cnn_cfg.model.z_channels, out_dim, out_dim, proj_type=proj_type)
 
+            assert isinstance(low_level_cache_layers, list)
             low_lvl_z_proj = nn.ModuleList()
-            for i in range(len(self.cache_layers["low_level"])):
+            for i in range(len(low_level_cache_layers)):
                 low_lvl_z_proj.append(
                     build_mlp(
                         self.low_lvl_repa_proj_chans[i],
@@ -1074,6 +1154,7 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
 
         def _build_sem_proj(out_dim: int) -> nn.Module:
             if self.sem_repa_proj_is_multi_layer_cached:
+                assert isinstance(sem_cache_layers, list)
                 sem_z_proj = nn.ModuleList()
                 for _ in range(len(sem_cache_layers)):
                     sem_z_proj.append(
@@ -1129,6 +1210,30 @@ class CosmosHybridTokenizer(ContinuousImageTokenizer):
                     if param.requires_grad and param.grad is None:
                         param.grad = torch.zeros_like(param)
 
+    def _post_quantize_latent_for_transmission(self, latent: Tensor):
+        """
+        Simulate the transmission NF4 or FP8 downcast and then upcast back to BF16.
+        """
+        from torchao.dtypes import to_nf4
+
+        if self.training:
+            return latent
+
+        if self.quantize_encode_infer == "h_fp8":
+            latent = (latent * 10).to(torch.float8_e4m3fn)
+            latent = latent.to(torch.bfloat16) / 10
+        elif self.quantize_encode_infer == "h_nf4":
+            b, c, h, w = latent.shape
+            latent = latent * 100
+            latent = to_nf4(latent.view(b * c, h * w), block_size=16, scaler_block_size=64)
+            latent = latent.to(torch.bfloat16).view(b, c, h, w) / 100
+        elif self.quantize_encode_infer in ("", None, "h_bf16"):
+            pass
+        else:
+            raise ValueError(f"Unknown quantize_encode_infer: {self.quantize_encode_infer}")
+
+        return latent
+
 
 ###### Configs #######
 
@@ -1177,7 +1282,7 @@ def hybrid_distillation_f16_config(
       channel_drop_config:
         drop_type: [16, 32, 48]
         max_channels: 64
-        drop_prob: 0.5
+        drop_prob: 0.0
       loading_type: hybrid_pretrained
       uni_path: {pretrained_path}
 
@@ -1396,8 +1501,8 @@ def hyrbid_lejea_iejepa_f8_config():
     return OmegaConf.create(yml)
 
 
-def hybrid_dual_latent_distill_f8_config():
-    cfg = hybrid_ijepa_f8_config()
+def hybrid_dual_latent_distill_f8_config(pretrained_path: str = ""):
+    cfg = hybrid_ijepa_f8_config(pretrained_path=pretrained_path)
     cfg.cnn_cfg.dual_latent_branch = True
     cfg.cnn_cfg.continuous_latent_channels = 32
     cfg.cnn_cfg.model.latent_channels = 64  # is discreate channel
@@ -1405,12 +1510,13 @@ def hybrid_dual_latent_distill_f8_config():
     return cfg
 
 
-def hybrid_asymmetrical_enc_dec_f16_config() -> DictConfig:
+def hybrid_asymmetrical_enc_dec_f16_config(pretrained_path="") -> DictConfig:
     """
     Reuse the base dual-latent config and add an asymmetric CNN decoder config.
     Encoder keeps x8 compression while decoder is set to x16 upsampling.
     """
-    cfg = hybrid_dual_latent_distill_f8_config()
+    cfg = hybrid_dual_latent_distill_f8_config(pretrained_path=pretrained_path)
+    cfg.cnn_cfg.model.norm_type = "trmsnorm2d"
     cfg.trans_enc_cfg.patch_size = 2
     cfg.trans_enc_cfg.unpatch_size = 1
     cfg.cnn_dec_cfg = OmegaConf.create(
@@ -1459,6 +1565,8 @@ def test_model_forward_backward(
     check_grad: bool = False,
     save_pca_vis: bool = False,
     pca_type: str = "proj",
+    quantize_encode_infer: str | None = None,
+    per_sample_info: bool = False,
 ):
     """Test the forward and backward pass of the CosmosHybridTokenizer model.
 
@@ -1499,10 +1607,13 @@ def test_model_forward_backward(
 
     from fvcore.nn import parameter_count_table
     from PIL import Image
-    from torchmetrics.aggregation import MeanMetric
-    from torchmetrics.image import PeakSignalNoiseRatio
-    from torchvision.utils import make_grid
+    from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+    from torchmetrics.image.sam import SpectralAngleMapper
+    from torchmetrics.regression import MeanSquaredError
+    from torchvision.utils import make_grid  # type: ignore[unresolved-import]
     from tqdm import tqdm
+    from torchao.quantization import quantize_, Int4WeightOnlyConfig, Int8WeightOnlyConfig, Float8WeightOnlyConfig
+    from torchao.dtypes import to_nf4
 
     from src.data.hyperspectral_loader import get_fast_test_hyperspectral_data
     from src.data.litdata_hyperloader import get_fast_test_hyper_litdata_load
@@ -1521,16 +1632,23 @@ def test_model_forward_backward(
     # )
     # cfg = hyrbid_lejea_iejepa_f8_config()
     # cfg = hybrid_dual_latent_distill_f8_config()
-    # cfg = hybrid_asymmetrical_enc_dec_f16_config()
+    # cfg = hybrid_asymmetrical_enc_dec_f16_config(
+    #     "runs/stage1_cosmos_hybrid_dual_latent/2026-03-05_02-20-55_dual_bsq64_cont32_distill_ijepa_litdata_one_loader/ema/tokenizer/model.safetensors"
+    # )
     # breakpoint()
     model: CosmosHybridTokenizer = CosmosHybridTokenizer.create_model(
         cfg.cnn_cfg,
         cfg.trans_enc_cfg,
         trans_dec_cfg=cfg.trans_dec_cfg,
-        hybrid_tokenizer_cfg=cfg.hybrid_tokenizer_cfg,
         distillation_cfg=cfg.distillation_cfg,
+        hybrid_tokenizer_cfg=cfg.hybrid_tokenizer_cfg,
+        cnn_enc_cfg=cfg.get("cnn_enc_cfg"),
+        cnn_dec_cfg=cfg.get("cnn_dec_cfg"),
     )
     model = model.to(device, torch.bfloat16)  # Move model to device (CUDA or CPU)
+    if quantize_encode_infer in ("h_nf4", "h_fp8"):
+        model.quantize_encode_infer = quantize_encode_infer
+
     if save_pca_vis:
         model.train()
     else:
@@ -1554,7 +1672,7 @@ def test_model_forward_backward(
             iterations = [x]
             is_itered = True
         else:
-            # dl = get_fast_test_hyperspectral_data(batch_size=1, data_type=real_data)  # type: ignore
+            # dl = get_fast_test_hyperspectral_data(batch_size=1, data_type=real_data)
             dl = get_fast_test_hyper_litdata_load(real_data, batch_size=1, stream_ds_kwargs={"shuffle": True})[1]  # type: ignore
             iterations = dl
     else:
@@ -1567,105 +1685,181 @@ def test_model_forward_backward(
     if use_optim:
         opt = torch.optim.Adam(model.parameters(), lr=1e-4)
 
-    metric = PeakSignalNoiseRatio(data_range=1.0).to(device)
+    def _metric_to_float(metric_value: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | float) -> float:
+        if isinstance(metric_value, tuple):
+            metric_value = metric_value[0]
+        if isinstance(metric_value, torch.Tensor):
+            return float(metric_value.detach().mean().item())
+        return float(metric_value)
+
+    psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(device)
+    ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    mse_metric = MeanSquaredError().to(device)
+    sam_metric: SpectralAngleMapper | None = None
+    psnr_values: list[float] = []
+    ssim_values: list[float] = []
+    mse_values: list[float] = []
+    sam_values: list[float] = []
     if compute_mean_std:
         mean_lst = []
         std_lst = []
-    ctx = torch.no_grad if not (use_optim or check_grad) else torch.enable_grad
 
-    with torch.autocast(str(device), dtype=torch.bfloat16):
-        for index, x in (tbar := tqdm(enumerate(iterations))):
-            if index < 10:
-                continue
+    if quantize_encode_infer == "enc_nf4":
+        quantize_(
+            model.encoder,
+            Int4WeightOnlyConfig(group_size=64),
+            filter_fn=lambda mod, name: isinstance(mod, (torch.nn.Linear, torch.nn.Conv2d)),
+        )
+    elif quantize_encode_infer == "enc_int4":
+        quantize_(
+            model.encoder,
+            Int4WeightOnlyConfig(group_size=64),
+            filter_fn=lambda mod, name: isinstance(mod, (torch.nn.Linear, torch.nn.Conv2d)),
+        )
+    elif quantize_encode_infer == "enc_int8":
+        quantize_(
+            model.encoder,
+            Int8WeightOnlyConfig(),
+            filter_fn=lambda mod, name: isinstance(mod, (torch.nn.Linear, torch.nn.Conv2d)),
+        )
+    elif quantize_encode_infer == "enc_fp8":
+        quantize_(
+            model.encoder,
+            Float8WeightOnlyConfig(),
+            filter_fn=lambda mod, name: isinstance(mod, (torch.nn.Linear, torch.nn.Conv2d)),
+        )
 
-            with ctx():
-                if isinstance(x, dict):
-                    x = x["img"].to(device, dtype)
-                elif x.dtype != dtype:
-                    x = x.to(dtype)
+    for index, x in (tbar := tqdm(enumerate(iterations))):
+        if index < 10:
+            continue
 
-                # Forward pass
-                if not (use_optim or check_grad):
-                    # Eval mode
-                    with torch.no_grad():
-                        encoded = model.encode(x)
-                        encoded_tensor = encoded.to_dec
+        if isinstance(x, dict):
+            x = x["img"].to(device, dtype)
+        elif x.dtype != dtype:
+            x = x.to(dtype)
 
-                        # Decode with proper input shape
-                        decoded = model.decode(encoded, x.shape)
-                        decoded_tensor = decoded.recon
+        # Forward pass
+        if not (use_optim or check_grad):
+            # Eval mode
+            with torch.no_grad():
+                encoded = model.encode(x)
+                encoded_tensor = encoded.to_dec
 
+            with torch.autocast(str(device), dtype=torch.bfloat16):
+                # Decode with proper input shape
+                decoded = model.decode(encoded, x.shape)
+                decoded_tensor = decoded.recon
+
+                if per_sample_info:
+                    if quantize_encode_infer is None:
                         logger.info(
-                            f"min: {encoded_tensor.min()}, max: {encoded_tensor.max()}, mean: {encoded_tensor.mean()}, std: {encoded_tensor.std()}",
+                            f"min: {encoded_tensor.min()}, max: {encoded_tensor.max()}, mean: {encoded_tensor.mean()}, std: {encoded_tensor.std()} | "
+                            f"latent dtype: {encoded_tensor.dtype}",
                             tqdm=True,
                         )
-                else:
-                    # Training mode
-                    encoded = model.encode(x)
-                    encoded_tensor, q_loss, loss_breakdown = encoded.to_dec, encoded.q_loss, encoded.q_loss_breakdown
-                    decoded_tensor = model.decode(encoded, x.shape).recon
+                    else:
+                        _dtype = (
+                            encoded_tensor.quantized_data.dtype
+                            if hasattr(encoded_tensor, "quantized_data")
+                            else encoded_tensor.dtype
+                        )
+                        logger.info(f"latent dtype: {_dtype}", tqdm=True)
+        else:
+            # Training mode
+            encoded = model.encode(x)
+            encoded_tensor, q_loss, loss_breakdown = encoded.to_dec, encoded.q_loss, encoded.q_loss_breakdown
+            decoded_tensor = model.decode(encoded, x.shape).recon
 
-            decoded_tensor.clamp_(-1, 1)
-            if decoded_tensor.shape[-2:] != x.shape[-2:]:
-                raise RuntimeError(
-                    "Decoded tensor spatial size mismatch: "
-                    f"decoded={decoded_tensor.shape[-2:]}, target={x.shape[-2:]}. "
-                    "Please fix decoder upsampling ratio in config."
-                )
+        decoded_tensor.clamp_(-1, 1)
+        if decoded_tensor.shape[-2:] != x.shape[-2:]:
+            raise RuntimeError(
+                "Decoded tensor spatial size mismatch: "
+                f"decoded={decoded_tensor.shape[-2:]}, target={x.shape[-2:]}. "
+                "Please fix decoder upsampling ratio in config."
+            )
 
-            # Compute mean and std of the latent
-            if compute_mean_std:
-                h = encoded_tensor
-                mean_c, std_c = h.mean((0, -2, -1)), h.std((0, -2, -1))  # per-channel value
-                mean_lst.append(mean_c)
-                std_lst.append(std_c)
+        # Compute mean and std of the latent
+        if compute_mean_std:
+            h = encoded_tensor
+            mean_c, std_c = h.mean((0, -2, -1)), h.std((0, -2, -1))  # per-channel value
+            mean_lst.append(mean_c)
+            std_lst.append(std_c)
 
-            # save reconstruction
-            if save_img_dir is not None:
-                Path(save_img_dir).mkdir(parents=True, exist_ok=True)
+        # save reconstruction
+        if save_img_dir is not None:
+            Path(save_img_dir).mkdir(parents=True, exist_ok=True)
 
-                def plot_img(img, path, name_suffix=""):
-                    y_grid = make_grid(img.float(), nrow=1, padding=2)
-                    # Handle case where image has fewer channels than rgb_chans
-                    available_chans = min(len(rgb_chans), y_grid.shape[0])
-                    selected_chans = [
-                        rgb_chans[i] if rgb_chans[i] < y_grid.shape[0] else i for i in range(available_chans)
-                    ]
-                    y_grid = y_grid[selected_chans].permute(1, 2, 0).detach().cpu().numpy()  # [h, w, 3]
-                    y_grid = (y_grid + 1) / 2
-                    y_grid = (y_grid * 255.0).astype(np.uint8)
-                    Image.fromarray(y_grid).save(path)
-                    logger.info(f"save reconstruction image {name_suffix}")
+            def plot_img(img, path, name_suffix=""):
+                y_grid = make_grid(img.float(), nrow=1, padding=2)
+                # Handle case where image has fewer channels than rgb_chans
+                available_chans = min(len(rgb_chans), y_grid.shape[0])
+                selected_chans = [rgb_chans[i] if rgb_chans[i] < y_grid.shape[0] else i for i in range(available_chans)]
+                y_grid = y_grid[selected_chans].permute(1, 2, 0).detach().cpu().numpy()  # [h, w, 3]
+                y_grid = (y_grid + 1) / 2
+                y_grid = (y_grid * 255.0).astype(np.uint8)
+                Image.fromarray(y_grid).save(path)
+                logger.info(f"save reconstruction image {name_suffix}")
 
-                plot_img(
-                    decoded_tensor,
-                    Path(save_img_dir) / f"recon_{real_data or 'fake'}_{index}.png",
-                    "reconstruction",
-                )
-                plot_img(x, Path(save_img_dir) / f"gt_{real_data or 'fake'}_{index}.png", "ground truth")
+            plot_img(
+                decoded_tensor,
+                Path(save_img_dir) / f"recon_{real_data or 'fake'}_{index}.png",
+                "reconstruction",
+            )
+            plot_img(x, Path(save_img_dir) / f"gt_{real_data or 'fake'}_{index}.png", "ground truth")
 
-            # psnr
-            if real_data:
-                psnr_val = metric((x + 1) / 2, (decoded_tensor + 1) / 2)
-                logger.info(f"PSNR: {psnr_val:.4f} - shape: {x.shape}", tqdm=True)
-                tbar.set_description(f"PSNR: {psnr_val:.4f} - shape: {x.shape}")
-
-            if use_optim:
-                opt.zero_grad()
-                decoded_tensor.mean().backward()
-                opt.step()
-
-            if check_grad:
-                for n, p in model.named_parameters():
-                    if p.grad is None:
-                        logger.warning(f"{n} grad is None")
-
-            if max_iters <= index:
-                break
-
+        # reconstruction metrics
         if real_data:
-            result = metric.compute()
-            logger.info(f"Average PSNR: {result.item() if hasattr(result, 'item') else result}")
+            target = ((x + 1) / 2).clamp(0, 1)
+            pred = ((decoded_tensor + 1) / 2).clamp(0, 1)
+            psnr_val = _metric_to_float(psnr_metric(pred, target))
+            ssim_val = _metric_to_float(ssim_metric(pred, target))
+            mse_val = _metric_to_float(mse_metric(pred, target))
+            psnr_values.append(psnr_val)
+            ssim_values.append(ssim_val)
+            mse_values.append(mse_val)
+
+            metric_msg = f"PSNR: {psnr_val:.4f}, SSIM: {ssim_val:.4f}, MSE: {mse_val:.6f}"
+            if x.shape[1] > 3:
+                if sam_metric is None:
+                    sam_metric = SpectralAngleMapper().to(device)
+                sam_val = _metric_to_float(sam_metric(pred, target))
+                sam_values.append(sam_val)
+                metric_msg += f", SAM: {sam_val:.4f}"
+
+            metric_msg += f" - shape: {x.shape}"
+            if per_sample_info:
+                logger.info(metric_msg, tqdm=True)
+            tbar.set_description(metric_msg)
+
+        if use_optim:
+            opt.zero_grad()
+            decoded_tensor.mean().backward()
+            opt.step()
+
+        if check_grad:
+            for n, p in model.named_parameters():
+                if p.grad is None:
+                    logger.warning(f"{n} grad is None")
+
+        if max_iters <= index:
+            break
+
+    val_stats = None
+    if real_data:
+        val_stats = {
+            "PSNR": float(np.mean(psnr_values)),
+            "SSIM": float(np.mean(ssim_values)),
+            "MSE": float(np.mean(mse_values)),
+        }
+        avg_msg = (
+            f"Average PSNR: {val_stats['PSNR']:.4f}, "
+            f"Average SSIM: {val_stats['SSIM']:.4f}, "
+            f"Average MSE: {val_stats['MSE']:.6f}"
+        )
+        if sam_values:
+            val_stats["SAM"] = float(np.mean(sam_values))
+            avg_msg += f", Average SAM: {val_stats['SAM']:.4f}"
+        logger.info(avg_msg)
 
     # print mean and std of the latent
     if compute_mean_std:
@@ -1744,7 +1938,7 @@ def test_model_forward_backward(
             fig.savefig(f"tmp/pca_vis.webp")
 
     # Return for compatibility with original function
-    return decoded_tensor.mean().item() if use_optim else 0.0
+    return decoded_tensor.mean().item() if use_optim else 0.0, val_stats
 
 
 def _get_pca_vis(feat_list: torch.Tensor | list[torch.Tensor], norm_type: str = "channel"):
@@ -1791,8 +1985,51 @@ if __name__ == "__main__":
     """
     MODEL_COMPILED=0 LOVELY_TENSORS=1 python -m src.stage1.cosmos.cosmos_hybrid
     """
+    from itertools import product
+
+    data_names = ["SAM270k", "fmow_MS", "hyspectnet11k"]
+    quantize_infers = [None, "h_fp8", "h_nf4"]
+
+    all_stats = {}
+
     with logger.catch():
-        test_model_forward_backward(
-            real_data="SAM270k", compute_mean_std=True, max_iters=100, save_pca_vis=False, pca_type="proj"
-        )
-        # test_forward_pca()
+        for data_name, quantize_infer in product(data_names, quantize_infers):
+            print(f"working on {data_name=}, {quantize_infer=}")
+            print("-" * 60)
+            stats = test_model_forward_backward(
+                real_data=data_name,
+                compute_mean_std=False,
+                max_iters=100,
+                save_pca_vis=False,
+                pca_type="proj",
+                quantize_encode_infer=quantize_infer,
+            )
+            print("-" * 60)
+            # test_forward_pca()
+            print(stats)
+            all_stats[f"{data_name}/{quantize_infer}"] = stats
+
+    print(all_stats)
+    """
+    Transmission performance:
+
+    BigEarth S1 SAR
+    BFloat16    Average PSNR: 31.24, SSIM: 0.8921, MSE: 0.000512
+    Latent_FP8  Average PSNR: 31.12, SSIM: 0.8901, MSE: 0.000516
+    Latent_NF4  Average PSNR: 29.57, SSIM: 0.8832, MSE: 0.000621
+
+    SAM270k RGB
+    BFloat16    Average PSNR: 34.9851, Average SSIM: 0.9126, Average MSE: 0.000960
+    Latent_FP8  Average PSNR: 34.2619, Average SSIM: 0.9134, Average MSE: 0.000958
+    Latent_NF4  Average PSNR: 31.6517, Average SSIM: 0.8809, Average MSE: 0.001257
+
+    fmow_MS 12bands
+    BFloat16     Average PSNR: 38.5254, Average SSIM: 0.9627, Average MSE: 0.000190, Average SAM: 0.0322
+    Latent_FP8   Average PSNR: 38.1510, Average SSIM: 0.9591, Average MSE: 0.000203, Average SAM: 0.032
+    Latent_NF4   Average PSNR: 35.5014, Average SSIM: 0.9332, Average MSE: 0.000331, Average SAM: 0.0409
+
+    hyspectnet11k 202bands
+    BFloat16     Average PSNR: 35.3989, Average SSIM: 0.9104, Average MSE: 0.000342, Average SAM: 0.0775
+    Latent_FP8   Average PSNR: 35.1448, Average SSIM: 0.9058, Average MSE: 0.000363, Average SAM: 0.0777
+    Latent_NF4   Average PSNR: 33.9596, Average SSIM: 0.8868, Average MSE: 0.000449, Average SAM: 0.0831
+    """

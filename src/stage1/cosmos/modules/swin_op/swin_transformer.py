@@ -9,8 +9,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 import einops
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+from timm.models.layers import DropPath, to_2tuple, trunc_normal_, get_norm_layer
 from loguru import logger
+# try:
+#     import transformer_engine as te
+# except ImportError:
+#     te = None
 
 from ..variants.mlp import SwiGLU
 from .patch_merge.patch_merge_triton import patch_merge_blc
@@ -24,6 +28,8 @@ from .attn.func_flash_swin_hybrid import hybrid_sdpa_fwd_flash_swin_v3_bwd
 from .attn.func_flash_swin_v2 import flash_swin_attn_func_v2
 from .attn.func_flash_swin_v3 import flash_swin_attn_func_v3
 from .attn.func_swin import mha_core, window_partition, window_reverse
+
+from src.utilities.network_utils import compile_decorator
 
 logger = logger.bind(_name_="swin")
 
@@ -221,7 +227,7 @@ class WindowAttention(nn.Module):
 
 
 class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.SiLU, drop=0.0):
+    def __init__(self, in_features, hidden_features=None, out_features=None, actx_layer=nn.SiLU, drop=0.0):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -286,10 +292,13 @@ class SwinTransformerBlock(nn.Module):
         drop=0.0,
         drop_path=0.0,
         act_layer=nn.SiLU,
-        norm_layer=nn.LayerNorm,
+        norm_layer=None,
         output_2d=False,
+        act_checkpoint=False,
     ):
         super().__init__()
+        self.act_checkpoint = act_checkpoint
+        # print(f"[Swin]: {act_checkpoint}")
         self.dim = dim
         self.out_dim = dim if out_dim is None else out_dim
         self.input_resolution = self._normalize_input_resolution(input_resolution)
@@ -309,6 +318,10 @@ class SwinTransformerBlock(nn.Module):
             self.shift_size = 0
             self.window_size = min(self.input_resolution)
         assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
+
+        if norm_layer is None:
+            norm_layer = get_norm_layer("rmsnorm")
+        assert callable(norm_layer), "norm_layer should be a valid nn.Module"
 
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
@@ -373,7 +386,7 @@ class SwinTransformerBlock(nn.Module):
             return 0
         return self.shift_size
 
-    def forward(self, x):
+    def forward_fn(self, x):
         is_nchw_input = x.ndim == 4
         if is_nchw_input:
             B, C, H_2d, W_2d = x.shape
@@ -452,6 +465,12 @@ class SwinTransformerBlock(nn.Module):
             x = x.view(B, H, W, self.out_dim).permute(0, 3, 1, 2).contiguous()
 
         return x
+
+    def forward(self, x):
+        if self.act_checkpoint:
+            return checkpoint.checkpoint(self.forward_fn, x, use_reentrant=False)
+        else:
+            return self.forward_fn(x)
 
     def extra_repr(self) -> str:
         return (

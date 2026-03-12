@@ -50,7 +50,9 @@ def load_weights_with_shape_check(
         if len(param_items) != len(weight_items):
             logger.warning(f"Parameter count mismatch: model has {len(param_items)}, weights have {len(weight_items)}")
 
-        for (name, param), (weight_name, weight) in zip(param_items, weight_items):
+        for (name, param), (weight_name, weight) in tqdm(
+            zip(param_items, weight_items), desc="Loading model checkpoint ...", total=len(param_items)
+        ):
             if name != weight_name:
                 logger.warning(f"Name mismatch: model has '{name}', weights have '{weight_name}'")
                 missing_keys.append(name)
@@ -70,8 +72,8 @@ def load_weights_with_shape_check(
 
     elif load_strategy == "search":
         matched_keys: set[str] = set()
-        params = module.named_parameters()
-        tbar = tqdm(params, desc="Loading model checkpoint ...")
+        params = list(module.named_parameters())
+        tbar = tqdm(params, desc="Loading model checkpoint ...", total=len(params))
         for name, param in tbar:
             weight = weights.get(name)
             if weight is None:

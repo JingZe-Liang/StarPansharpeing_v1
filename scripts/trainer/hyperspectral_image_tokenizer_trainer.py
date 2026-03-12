@@ -113,12 +113,10 @@ class CosmosHyperspectralTokenizerTrainer:
         _fsdp_plugin: accelerate.utils.FullyShardedDataParallelPlugin | None = getattr(
             self.accelerator.state, "fsdp_plugin", None
         )
-
         if _dpsp_plugin is not None:
             self.accelerator.deepspeed_plugin.deepspeed_config[  # type: ignore
                 "train_micro_batch_size_per_gpu"
             ] = self.dataset_cfg.batch_size_train
-
         self.no_ema = False
         self._is_ds = _dpsp_plugin is not None
         if self._is_ds:
@@ -127,6 +125,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 "stage"
             ] in [2, 3]
 
+        # FSDP2
         self._is_fsdp = _fsdp_plugin is not None
         if self._is_fsdp:
             self.log_msg("[FSDP]: using Fully Sharded Data Parallel plugin")
@@ -246,8 +245,6 @@ class CosmosHyperspectralTokenizerTrainer:
         # Training state counter
         self.train_state = StepsCounter(["train"])
 
-        self.accelerator.prepare_model
-
     def _encode_dino_cls(self, model: nn.Module, x: torch.Tensor) -> torch.Tensor:
         encode_fn = getattr(model, "encode_dino_cls", None)
         if callable(encode_fn):
@@ -263,12 +260,12 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def _setup_diffusion_model(self) -> None:
         self.diffusion_model = None
-        if not getattr(self, "_use_diffusion", False):
+        if not self._use_diffusion:
             return
 
-        diffusion_cfg = getattr(self.train_cfg, "diffusion", None)
+        diffusion_cfg = self.cfg.get("diffusion_reg")
         if diffusion_cfg is None or not hasattr(diffusion_cfg, "model") or diffusion_cfg.model is None:
-            raise ValueError("Diffusion loss is enabled, but `train.diffusion.model` is missing in config.")
+            raise ValueError("Diffusion loss is enabled, but diffusion model config is missing.")
 
         self.diffusion_model = hydra.utils.instantiate(diffusion_cfg.model)
         assert isinstance(self.diffusion_model, nn.Module), "train.diffusion.model must instantiate to nn.Module"
@@ -386,7 +383,7 @@ class CosmosHyperspectralTokenizerTrainer:
             dino_cfg = cfg.dino_cls
             embed_dim = getattr(dino_cfg, "embed_dim", None)
             if not isinstance(embed_dim, int):
-                raise ValueError("dino_cls需要在配置中显式给定 `proxy_task.dino_cls.embed_dim`。")
+                raise ValueError("dino_cls should be set by `proxy_task.dino_cls.embed_dim` in cfg.")
 
             if not hasattr(self.tokenizer, "dino_cls_head"):
                 self.tokenizer.dino_cls_head = DINOHead(  # type: ignore[attr-defined]
@@ -430,13 +427,13 @@ class CosmosHyperspectralTokenizerTrainer:
 
         if sep_enc_dec:
             raise ValueError(
-                "当前 trainer 已不再支持 `train.seperate_enc_dec=True`（encoder/decoder 分离加载）。"
-                "请使用 unified tokenizer（encoder+decoder 合并在同一个 model 内）并将其设为 False。"
+                "The current trainer no longer supports `train.seperate_enc_dec=True` (separate encoder/decoder loading). "
+                "Please use a unified tokenizer (encoder and decoder merged in the same model) and set this to False."
             )
         if tokenizer_name in {"cosmos_sep"}:
             raise ValueError(
-                f"tokenizer_name={tokenizer_name} 需要 separate encoder/decoder，但该 trainer 已移除该模式；"
-                "请改用 unified tokenizer 配置（例如 cosmos_uni / dcae 等）。"
+                f"tokenizer_name={tokenizer_name} requires a separate encoder/decoder, but this mode has been removed; "
+                "please use a unified tokenizer configuration (e.g., cosmos_uni / dcae)."
             )
 
         self.log_msg("[Tokenizer]: Use encoder, decoder, and quantizer in one class")
@@ -879,85 +876,67 @@ class CosmosHyperspectralTokenizerTrainer:
 
             heavyball.utils.compile_mode = None  # type: ignore[invalid-assignment]
 
-        # optimizers
-        if (
+        not_use_ds_optim = (
             self.accelerator.state.deepspeed_plugin is None
             or "optimizer" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
-        ):
+        )
 
-            def _optimizer_creater(optimizer_cfg, params_getter: Callable, no_wd_param_names: list[str] | None):
-                # if "muon" in optimizer_cfg._target_ or "adam_mini" in optimizer_cfg._target_:
-                if any(x in optimizer_cfg._target_ for x in ["muon", "adam_mini", "muonball", "spectralball"]):
-                    self.log_msg(f"[Optimizer]: using {optimizer_cfg._target_} optimizer")
-                    # is muon optimizer function
-                    named_params = params_getter(with_name=True)
-                    if "adam_mini" in optimizer_cfg._target_:
-                        named_params = [(k, v) for k, v in named_params.items()]
-                    return hydra.utils.instantiate(optimizer_cfg)(
-                        named_parameters=named_params
-                    )  # set no weight decay params in function
-                else:
-                    self.log_msg(f"[Optimizer]: using optimizer: {optimizer_cfg._target_}")
-                    params = params_getter(with_name=False if no_wd_param_names is None else True)
-                    if no_wd_param_names is not None:
-                        from src.utilities.train_utils.optim import filter_no_wds_into_optim_groups
+        def _optimizer_creater(optimizer_cfg, params_getter: Callable, no_wd_param_names: list[str] | None):
+            # if "muon" in optimizer_cfg._target_ or "adam_mini" in optimizer_cfg._target_:
+            if any(x in optimizer_cfg._target_ for x in ["muon", "adam_mini", "muonball", "spectralball"]):
+                self.log_msg(f"[Optimizer]: using {optimizer_cfg._target_} optimizer")
+                # is muon optimizer function
+                named_params = params_getter(with_name=True)
+                if "adam_mini" in optimizer_cfg._target_:
+                    named_params = [(k, v) for k, v in named_params.items()]
+                return hydra.utils.instantiate(optimizer_cfg)(
+                    named_parameters=named_params
+                )  # set no weight decay params in function
+            else:
+                self.log_msg(f"[Optimizer]: using optimizer: {optimizer_cfg._target_}")
+                params = params_getter(with_name=False if no_wd_param_names is None else True)
+                if no_wd_param_names is not None:
+                    from src.utilities.train_utils.optim import filter_no_wds_into_optim_groups
 
-                        params = filter_no_wds_into_optim_groups(params, no_wd_param_names)
-                    return hydra.utils.instantiate(optimizer_cfg)(params)
+                    params = filter_no_wds_into_optim_groups(params, no_wd_param_names)
+                return hydra.utils.instantiate(optimizer_cfg)(params)
 
-            # Create optimizer ==========
+        # optimizers
+        if not_use_ds_optim:
             tokenizer_optim = _optimizer_creater(
                 self.train_cfg.tokenizer_optimizer,
                 self._get_tokenizer_params,
                 getattr(self.train_cfg, "tokenizer_no_wd_params", None),
             )
+            disc_optim = None
+            diffusion_optim = None
             if self._use_disc:
                 disc_optim = _optimizer_creater(
                     self.train_cfg.disc_optimizer,
                     self._get_disc_params,
                     getattr(self.train_cfg, "disc_no_wd_params", None),
                 )
-            else:
-                disc_optim = None
-            if getattr(self, "_use_diffusion", False):
-                assert hasattr(self.train_cfg, "diffusion"), "train.diffusion is required when diffusion is enabled"
-                assert self.train_cfg.diffusion.optimizer is not None, (
-                    "train.diffusion.optimizer is required when diffusion is enabled"
-                )
+            if self._use_diffusion:
+                diffusion_cfg = self.cfg.diffusion_reg
                 diffusion_optim = _optimizer_creater(
-                    self.train_cfg.diffusion.optimizer,
+                    diffusion_cfg.optimizer,
                     self._get_diffusion_params,
                     getattr(self.train_cfg, "diffusion_no_wd_params", None),
                 )
-            else:
-                diffusion_optim = None
         else:
             tokenizer_optim = DummyOptim([{"params": self._get_tokenizer_params()}])
             disc_optim = DummyOptim([{"params": self._get_disc_params()}]) if self._use_disc else None
-            diffusion_optim = (
-                DummyOptim([{"params": self._get_diffusion_params()}])
-                if getattr(self, "_use_diffusion", False)
-                else None
-            )
+            diffusion_optim = DummyOptim([{"params": self._get_diffusion_params()}]) if self._use_diffusion else None
 
         # schedulers
-        if (
-            self.accelerator.state.deepspeed_plugin is None
-            or "scheduler" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
-        ):
+        if not_use_ds_optim:
             tokenizer_sched = hydra.utils.instantiate(self.train_cfg.tokenizer_sched)(optimizer=tokenizer_optim)
-            disc_sched = (
-                hydra.utils.instantiate(self.train_cfg.disc_sched)(optimizer=disc_optim) if self._use_disc else None
-            )
-            if getattr(self, "_use_diffusion", False):
-                assert self.train_cfg.diffusion.scheduler is not None, (
-                    "train.diffusion.scheduler is required when diffusion is enabled"
-                )
-            diffusion_sched = (
-                hydra.utils.instantiate(self.train_cfg.diffusion.scheduler)(optimizer=diffusion_optim)
-                if getattr(self, "_use_diffusion", False)
-                else None
-            )
+            disc_sched, diffusion_sched = None, None
+            if self._use_disc:
+                disc_sched = hydra.utils.instantiate(self.train_cfg.disc_sched)(optimizer=disc_optim)
+            if self._use_diffusion:
+                diffusion_cfg = self.cfg.diffusion_reg
+                diffusion_sched = hydra.utils.instantiate(diffusion_cfg.scheduler)(optimizer=diffusion_optim)
         else:
             tokenizer_sched = DummyScheduler(tokenizer_optim)
             disc_sched = DummyScheduler(disc_optim) if self._use_disc else None
@@ -1489,7 +1468,13 @@ class CosmosHyperspectralTokenizerTrainer:
 
         return ret
 
-    def forward_tokenizer(self, x: torch.Tensor, ema: bool = False, is_testing: bool = False) -> edict:
+    def forward_tokenizer(
+        self,
+        x: torch.Tensor,
+        ema: bool = False,
+        is_testing: bool = False,
+        use_quantizer: bool | None = None,
+    ) -> edict:
         out_d = edict()
         _ = is_testing  # kept for backward compatibility; prefer `ema`
 
@@ -1501,7 +1486,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 tokenizer = self.tokenizer
 
             assert isinstance(tokenizer, nn.Module), "tokenizer must be a torch.nn.Module"
-            dec_out = tokenizer(x)
+            dec_out = tokenizer(x, enc_kwargs={"use_quantizer": use_quantizer})
             recon = dec_out["recon"]
 
             _unwrap_tok = self.accelerator.unwrap_model(tokenizer)
@@ -1520,13 +1505,40 @@ class CosmosHyperspectralTokenizerTrainer:
             _q_dict = dict(q_loss=None, q_info=None, latent_q=None)
         out_d.update(_q_dict)
 
-        # repa or vf feature
+        # repa / vf / semantic-distill features
+        need_repa_like_feature = bool(
+            getattr(self.vq_loss_fn, "use_repa", False)
+            or getattr(self.vq_loss_fn, "use_vf", False)
+            or getattr(self.vq_loss_fn, "use_sem_distill", False)
+        )
         if (
             hasattr(_unwrap_tok, "get_repa_feature")
             and getattr(_unwrap_tok, "_use_repa_loss", False)
             and _unwrap_tok.training
+            and need_repa_like_feature
         ):
-            repa_feature = _unwrap_tok.get_repa_feature()  # type: ignore
+            repa_feature = None
+            use_multi_teacher_proj = bool(getattr(_unwrap_tok, "_use_multi_teacher_proj", False))
+            if use_multi_teacher_proj:
+                get_multi_teacher_repa_feature = getattr(_unwrap_tok, "_get_multi_teacher_repa_feature", None)
+                if callable(get_multi_teacher_repa_feature):
+                    repa_feature_by_teacher = get_multi_teacher_repa_feature(force_to=False)
+                    assert repa_feature_by_teacher is not None, "repa_feature_by_teacher is None"
+                    teacher_names = list(getattr(_unwrap_tok, "_teacher_names", []))
+                    if len(teacher_names) == 0:
+                        teacher_names = list(repa_feature_by_teacher.keys())
+                    assert len(teacher_names) > 0, "teacher_names is empty in multi-teacher mode"
+                    primary_teacher = teacher_names[0]
+                    assert primary_teacher in repa_feature_by_teacher, (
+                        f"primary_teacher={primary_teacher} not found in repa_feature_by_teacher"
+                    )
+                    repa_feature = repa_feature_by_teacher[primary_teacher]
+                    out_d["repa_feature_by_teacher"] = repa_feature_by_teacher
+                else:
+                    repa_feature = _unwrap_tok.get_repa_feature()  # type: ignore
+            else:
+                repa_feature = _unwrap_tok.get_repa_feature()  # type: ignore
+
             assert repa_feature is not None, "repa_feature is None"
             if torch.is_tensor(repa_feature):
                 out_d["repa_feature"] = repa_feature
@@ -2292,8 +2304,11 @@ class CosmosHyperspectralTokenizerTrainer:
 
     def val_step(self, batch: dict) -> torch.Tensor:
         img = batch["img"].to(self.device, self.dtype)
+        val_use_quantizer = getattr(self.val_cfg, "use_quantizer", None)
+        if val_use_quantizer not in (None, True, False):
+            raise ValueError(f"val.use_quantizer should be None/True/False, got {val_use_quantizer}")
         with torch.no_grad():
-            recon = self.forward_tokenizer(img, ema=True)["recon"]
+            recon = self.forward_tokenizer(img, ema=True, use_quantizer=val_use_quantizer)["recon"]
         return recon
 
     def val_loop(self):
@@ -2642,7 +2657,7 @@ class CosmosHyperspectralTokenizerTrainer:
                     "Non-disc strict mode does not allow resuming checkpoints containing discriminator state."
                 )
         self.log_msg("[Resume]: resume training")
-        self.accelerator.load_state(path, load_kwargs={"weights_only": False})
+        self.accelerator.load_state(path, load_kwargs={"weights_only": False}, strict=False)
         self.accelerator.wait_for_everyone()
 
     def to_rgb(self, x):
@@ -2741,7 +2756,7 @@ class CosmosHyperspectralTokenizerTrainer:
                 self.proxy_aug_manager.shutdown()
 
 
-_key = "hybrid_cosmos_tokenizer_dual_bsq64_cont32_phi_s_ijepa"
+_key = "unicosmos_bsq_f8c36p4"
 _configs_dict = {
     # use pretrained cosmos world tokenizer (continous image configuration)
     "cosmos_sep_f8c16p4": "cosmos_post_train_f8c16p4",

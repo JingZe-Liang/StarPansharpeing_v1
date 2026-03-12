@@ -62,15 +62,30 @@ def dump_config(config, path, log_config=True):
         f.write(yaml_dump)
 
 
-def set_defaults(cfg: dict | None, defaults: dict[str, Any] = {}, use_edict=True, **kwargs) -> dict | edict:
-    """set defaults for dict/edict config"""
-    if cfg is None:
-        cfg = {}
-    for k, v in defaults.items():
-        cfg.setdefault(k, v)
-    for k, v in kwargs.items():
-        cfg.setdefault(k, v)
-    return edict(cfg) if use_edict else cfg
+def _set_config_default(cfg: dict[str, Any] | DictConfig, key: Any, value: Any) -> None:
+    if isinstance(cfg, DictConfig):
+        cfg.setdefault(key, value)
+        return
+
+    cfg.setdefault(key, value)
+
+
+def set_defaults(
+    cfg: dict[str, Any] | DictConfig | None,
+    defaults: dict[str, Any] | DictConfig | None = None,
+    use_edict: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any] | DictConfig | edict:
+    """Set default values for dict-like configs, including DictConfig."""
+    normalized_cfg: dict[str, Any] | DictConfig = {} if cfg is None else cfg
+    default_values = {} if defaults is None else defaults
+
+    for key, value in default_values.items():
+        _set_config_default(normalized_cfg, key, value)
+    for key, value in kwargs.items():
+        _set_config_default(normalized_cfg, key, value)
+
+    return edict(normalized_cfg) if use_edict else normalized_cfg
 
 
 def extract_needed_kwargs(kwargs: dict, cls: Callable | type, include_default: bool = False) -> dict:

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from importlib import import_module
 from typing import Any, Literal
 
@@ -7,6 +5,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from dataclasses import dataclass
 
 from .ops.grouped_gemm_swiglu import Gemm1SwiGLUFusionBackend, grouped_gemm1_swiglu_dispatch
 from .ops.swiglu import SwiGLUBackend, swiglu_from_packed
@@ -20,6 +19,42 @@ except Exception:
 
 GroupedBackend = Literal["auto", "torch_grouped_mm", "torch__grouped_mm", "unsloth", "reference"]
 ScoreFunction = Literal["sigmoid", "softmax"]
+
+
+@dataclass(frozen=True)
+class ExpertSlotLayout:
+    num_ffn_experts: int
+    num_zero_experts: int
+    num_copy_experts: int
+    num_constant_experts: int
+
+    @property
+    def total_num_experts(self) -> int:
+        return self.num_ffn_experts + self.num_zero_experts + self.num_copy_experts + self.num_constant_experts
+
+    @property
+    def zero_start(self) -> int:
+        return self.num_ffn_experts
+
+    @property
+    def copy_start(self) -> int:
+        return self.zero_start + self.num_zero_experts
+
+    @property
+    def constant_start(self) -> int:
+        return self.copy_start + self.num_copy_experts
+
+    def is_ffn(self, expert_ids: torch.Tensor) -> torch.Tensor:
+        return expert_ids < self.zero_start
+
+    def is_copy(self, expert_ids: torch.Tensor) -> torch.Tensor:
+        return (expert_ids >= self.copy_start) & (expert_ids < self.constant_start)
+
+    def is_constant(self, expert_ids: torch.Tensor) -> torch.Tensor:
+        return expert_ids >= self.constant_start
+
+    def to_constant_local_index(self, expert_ids: torch.Tensor) -> torch.Tensor:
+        return expert_ids - self.constant_start
 
 
 def _make_offsets_from_counts(counts: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -242,7 +277,7 @@ class DeepSeekV3MoEGEMM(nn.Module):
         return_router_logits=True,
         return_aux_components=True,
     )
-    # router_logits: [B*S, num_experts]
+    # router_logits: [B*S, total_num_experts]
     # aux keys: {"z_loss", "seq_aux_loss", "aux_loss"}
     ```
     """
@@ -252,6 +287,10 @@ class DeepSeekV3MoEGEMM(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         num_experts: int,
+        num_shared_experts: int | None = None,
+        num_zero_experts: int = 0,
+        num_copy_experts: int = 0,
+        num_constant_experts: int = 0,
         top_k: int = 8,
         n_group: int = 8,
         topk_group: int = 4,
@@ -275,11 +314,26 @@ class DeepSeekV3MoEGEMM(nn.Module):
             raise ValueError("top_k must be positive.")
         if num_experts <= 0:
             raise ValueError("num_experts must be positive.")
-        if n_group <= 0 or num_experts % n_group != 0:
-            raise ValueError("n_group must be positive and divide num_experts.")
+        if num_shared_experts is not None and num_shared_experts < 0:
+            raise ValueError("n_shared_experts must be non-negative.")
+        if num_zero_experts < 0:
+            raise ValueError("num_zero_experts must be non-negative.")
+        if num_copy_experts < 0:
+            raise ValueError("num_copy_experts must be non-negative.")
+        if num_constant_experts < 0:
+            raise ValueError("num_constant_experts must be non-negative.")
+        self.expert_slot_layout = ExpertSlotLayout(
+            num_ffn_experts=num_experts,
+            num_zero_experts=num_zero_experts,
+            num_copy_experts=num_copy_experts,
+            num_constant_experts=num_constant_experts,
+        )
+        total_num_experts = self.expert_slot_layout.total_num_experts
+        if n_group <= 0 or total_num_experts % n_group != 0:
+            raise ValueError("n_group must be positive and divide total_num_experts.")
         if topk_group <= 0 or topk_group > n_group:
             raise ValueError("topk_group must be in [1, n_group].")
-        experts_per_group = num_experts // n_group
+        experts_per_group = total_num_experts // n_group
         if top_k > topk_group * experts_per_group:
             raise ValueError("top_k cannot exceed topk_group * experts_per_group.")
         if bias_update_interval <= 0:
@@ -290,6 +344,11 @@ class DeepSeekV3MoEGEMM(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_experts = num_experts
+        self.num_shared_experts = num_shared_experts if num_shared_experts not in {None, 0} else None
+        self.num_zero_experts = num_zero_experts
+        self.num_copy_experts = num_copy_experts
+        self.num_constant_experts = num_constant_experts
+        self.total_num_experts = total_num_experts
         self.top_k = top_k
         self.n_group = n_group
         self.topk_group = topk_group
@@ -310,17 +369,31 @@ class DeepSeekV3MoEGEMM(nn.Module):
         self.z_loss_coef = z_loss_coef
         self.enable_autoscale_aux = enable_autoscale_aux
 
-        self.router = nn.Linear(hidden_size, num_experts, bias=False)
+        self.router = nn.Linear(hidden_size, self.total_num_experts, bias=False)
         self.w1 = nn.Parameter(torch.empty(num_experts, 2 * intermediate_size, hidden_size))
         self.w2 = nn.Parameter(torch.empty(num_experts, hidden_size, intermediate_size))
         nn.init.normal_(self.w1, std=0.02)
         nn.init.normal_(self.w2, std=0.02)
+        self.constant_expert_vectors: nn.Parameter | None = None
+        if self.num_constant_experts > 0:
+            self.constant_expert_vectors = nn.Parameter(torch.empty(self.num_constant_experts, hidden_size))
+            nn.init.normal_(self.constant_expert_vectors, std=0.02)
+
+        self.shared_intermediate_size: int | None = None
+        self.shared_w1: nn.Parameter | None = None
+        self.shared_w2: nn.Parameter | None = None
+        if self.num_shared_experts is not None:
+            self.shared_intermediate_size = intermediate_size * self.num_shared_experts
+            self.shared_w1 = nn.Parameter(torch.empty(2 * self.shared_intermediate_size, hidden_size))
+            self.shared_w2 = nn.Parameter(torch.empty(hidden_size, self.shared_intermediate_size))
+            nn.init.normal_(self.shared_w1, std=0.02)
+            nn.init.normal_(self.shared_w2, std=0.02)
 
         if enable_expert_bias:
             self.register_buffer(
-                "local_tokens_per_expert", torch.zeros(num_experts, dtype=torch.float32), persistent=False
+                "local_tokens_per_expert", torch.zeros(self.total_num_experts, dtype=torch.float32), persistent=False
             )
-            self.register_buffer("expert_bias", torch.zeros(num_experts, dtype=torch.float32))
+            self.register_buffer("expert_bias", torch.zeros(self.total_num_experts, dtype=torch.float32))
             self.register_buffer("_bias_update_step", torch.zeros((), dtype=torch.int64), persistent=False)
         else:
             self.local_tokens_per_expert = None
@@ -374,7 +447,7 @@ class DeepSeekV3MoEGEMM(nn.Module):
             route_scores = scores
 
         num_tokens = route_scores.shape[0]
-        experts_per_group = self.num_experts // self.n_group
+        experts_per_group = self.total_num_experts // self.n_group
         top2 = min(2, experts_per_group)
         group_scores = (
             route_scores.view(num_tokens, self.n_group, experts_per_group).topk(top2, dim=-1).values.sum(dim=-1)
@@ -385,7 +458,7 @@ class DeepSeekV3MoEGEMM(nn.Module):
         score_mask = (
             group_mask.unsqueeze(-1)
             .expand(-1, self.n_group, experts_per_group)
-            .reshape(num_tokens, self.num_experts)
+            .reshape(num_tokens, self.total_num_experts)
             .to(torch.bool)
         )
         scores_for_choice = route_scores.masked_fill(~score_mask, 0.0)
@@ -407,6 +480,55 @@ class DeepSeekV3MoEGEMM(nn.Module):
             )
         y1 = grouped_gemm_dispatch(x_sorted, self.w1, counts, backend=self.grouped_backend)
         return swiglu_from_packed(y1, self.intermediate_size, backend=self.swiglu_backend)
+
+    def _run_ffn_experts(self, x_ffn: torch.Tensor, expert_ids: torch.Tensor) -> torch.Tensor:
+        if x_ffn.numel() == 0:
+            return x_ffn.new_zeros((0, self.hidden_size))
+
+        order = torch.argsort(expert_ids)
+        x_sorted = x_ffn[order]
+        expert_ids_sorted = expert_ids[order]
+        counts = torch.bincount(expert_ids_sorted, minlength=self.num_experts).to(torch.int32)
+        y_hidden = self._run_gemm1_and_swiglu(x_sorted, counts)
+        y2 = grouped_gemm_dispatch(y_hidden, self.w2, counts, backend=self.grouped_backend)
+
+        inv = torch.empty_like(order)
+        inv[order] = torch.arange(order.numel(), device=order.device)
+        return y2[inv]
+
+    def _lookup_constant_expert_outputs(self, expert_ids: torch.Tensor) -> torch.Tensor:
+        if self.constant_expert_vectors is None:
+            raise RuntimeError("constant_expert_vectors is not initialized.")
+        constant_local_idx = self.expert_slot_layout.to_constant_local_index(expert_ids)
+        return self.constant_expert_vectors[constant_local_idx]
+
+    def _dispatch_pair_outputs(self, x_rep: torch.Tensor, expert_ids: torch.Tensor) -> torch.Tensor:
+        pair_outputs = x_rep.new_zeros((x_rep.shape[0], self.hidden_size))
+
+        ffn_mask = self.expert_slot_layout.is_ffn(expert_ids)
+        if torch.any(ffn_mask):
+            pair_outputs[ffn_mask] = self._run_ffn_experts(x_rep[ffn_mask], expert_ids[ffn_mask]).to(
+                dtype=pair_outputs.dtype
+            )
+
+        copy_mask = self.expert_slot_layout.is_copy(expert_ids)
+        if torch.any(copy_mask):
+            pair_outputs[copy_mask] = x_rep[copy_mask]
+
+        constant_mask = self.expert_slot_layout.is_constant(expert_ids)
+        if torch.any(constant_mask):
+            pair_outputs[constant_mask] = self._lookup_constant_expert_outputs(expert_ids[constant_mask]).to(
+                dtype=pair_outputs.dtype
+            )
+
+        return pair_outputs
+
+    def _run_shared_experts(self, x_flat: torch.Tensor) -> torch.Tensor | None:
+        if self.shared_w1 is None or self.shared_w2 is None or self.shared_intermediate_size is None:
+            return None
+        y1 = F.linear(x_flat, self.shared_w1)
+        y_hidden = swiglu_from_packed(y1, self.shared_intermediate_size, backend=self.swiglu_backend)
+        return F.linear(y_hidden, self.shared_w2)
 
     def forward(
         self,
@@ -430,23 +552,16 @@ class DeepSeekV3MoEGEMM(nn.Module):
         topk_idx, topk_weights, scores, _ = self.route_tokens_to_experts(router_logits)
 
         x_rep = x_flat.repeat_interleave(self.top_k, dim=0)
-        exp_id = topk_idx.reshape(-1)
-        exp_weight = topk_weights.reshape(-1)
-        order = torch.argsort(exp_id)
+        pair_expert_ids = topk_idx.reshape(-1)
+        pair_weights = topk_weights.reshape(-1)
+        counts = torch.bincount(pair_expert_ids, minlength=self.total_num_experts).to(torch.int32)
+        pair_outputs = self._dispatch_pair_outputs(x_rep, pair_expert_ids)
+        y = (pair_outputs * pair_weights.unsqueeze(-1)).view(total_tokens, self.top_k, hidden_size).sum(dim=1)
 
-        x_sorted = x_rep[order]
-        exp_id_sorted = exp_id[order]
-        exp_weight_sorted = exp_weight[order]
-        counts = torch.bincount(exp_id_sorted, minlength=self.num_experts).to(torch.int32)
+        shared_output = self._run_shared_experts(x_flat)
+        if shared_output is not None:
+            y = y + shared_output
 
-        y_hidden = self._run_gemm1_and_swiglu(x_sorted, counts)
-        y2 = grouped_gemm_dispatch(y_hidden, self.w2, counts, backend=self.grouped_backend)
-
-        inv = torch.empty_like(order)
-        inv[order] = torch.arange(order.numel(), device=order.device)
-        y_pairs = y2[inv]
-        pair_weights = exp_weight_sorted[inv].unsqueeze(-1)
-        y = (y_pairs * pair_weights).view(total_tokens, self.top_k, hidden_size).sum(dim=1)
         y = y.view_as(x)
 
         if (
@@ -471,7 +586,7 @@ class DeepSeekV3MoEGEMM(nn.Module):
             seq_aux_loss_term = sequence_balance_loss(
                 scores,
                 topk_idx,
-                num_experts=self.num_experts,
+                num_experts=self.total_num_experts,
                 top_k=self.top_k,
                 batch_size=batch_size,
                 seq_len=seq_len,

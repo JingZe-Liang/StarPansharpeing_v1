@@ -77,6 +77,7 @@ from .rope import (
     get_1d_sincos_pos_embed_from_grid,
     get_2d_sincos_pos_embed,
     resample_1d_pe,
+    apply_rope_bhsd,
 )
 from .variants.cross_attn import CrossAttention
 from .variants.mlp import SwiGLU
@@ -85,9 +86,42 @@ JVP_FLASH_ATTN_ENABLED = False
 try:
     from jvp_flash_attention.jvp_attention import JVPAttn
     from jvp_flash_attention.jvp_attention import attention as jvp_attention
-
 except ImportError:
     JVP_FLASH_ATTN_ENABLED = False
+
+TE_ENABLED = False
+te: Any = None
+try:
+    import transformer_engine.pytorch as te
+
+    TE_ENABLED = True
+except ImportError:
+    TE_ENABLED = False
+
+
+def _resolve_te_attention_mask(
+    attention_mask: BlockMask | Tensor | None,
+    is_causal: bool,
+) -> tuple[Tensor | None, str]:
+    if isinstance(attention_mask, BlockMask):
+        attention_mask = attention_mask.to_dense()
+    if attention_mask is None:
+        return None, "causal" if is_causal else "no_mask"
+    return attention_mask, "arbitrary"
+
+
+def _to_te_bshd(x: Tensor) -> Tensor:
+    return x.transpose(1, 2).contiguous()
+
+
+def _resolve_cp_stream(cp_group, cp_stream):
+    if cp_group is None:
+        return cp_stream
+    if cp_stream is not None:
+        return cp_stream
+    if not torch.cuda.is_available():
+        raise RuntimeError("Context parallel requires CUDA to create a TE communication stream.")
+    return torch.cuda.current_stream()
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -159,29 +193,33 @@ class Attention(Attention_):
         delta_t_aware: bool = False,
         rotate_half=False,
         v_residual: bool = False,
+        use_te_dpa: bool = False,
+        te_qkv_format: str = "bshd",
     ):
         norm_layer = get_norm_layer(norm_layer) if isinstance(norm_layer, str) else norm_layer
         if norm_layer is None:
             norm_layer = nn.Identity
         norm_layer = cast(Type[nn.Module], norm_layer)
         super().__init__(
-            dim,
-            num_heads,
-            qkv_bias,
-            qkv_fused,
-            num_prefix_tokens,
-            attn_drop,
-            proj_drop,
-            attn_head_dim,
-            norm_layer,
-            qk_norm,
-            scale_norm,
-            proj_bias,
-            rotate_half,
+            dim=dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            qkv_fused=qkv_fused,
+            num_prefix_tokens=num_prefix_tokens,
+            attn_drop=attn_drop,
+            proj_drop=proj_drop,
+            attn_head_dim=attn_head_dim,
+            norm_layer=norm_layer,
+            qk_norm=qk_norm,
+            scale_norm=scale_norm,
+            proj_bias=proj_bias,
+            rotate_half=rotate_half,
         )
         self.attn_implem = attn_type
         self.is_causal = is_causal
         self.jvp = jvp
+
+        # diffusion compatible timestep linear layer
         self.delta_t_aware = delta_t_aware
         if delta_t_aware:
             self.qkv_delta_t = nn.Linear(dim, dim * 3)
@@ -202,6 +240,113 @@ class Attention(Attention_):
         if self.v_residual:
             self.v_residual_lamb1 = nn.Parameter(torch.tensor(0.5))
             self.v_residual_lamb2 = nn.Parameter(torch.tensor(0.5))
+
+        self.te_requested = use_te_dpa
+        self.use_te_dpa = bool(use_te_dpa and TE_ENABLED)
+        self.te_qkv_format = te_qkv_format
+        self.te_tp_group = None
+        self.te_tp_size = 1
+        self.te_sequence_parallel = False
+        self.te_cp_group = None
+        self.te_cp_global_ranks: list[int] | None = None
+        self.te_cp_stream = None
+        self.te_cp_comm_type = "p2p"
+        self.te_dpa: Any | None = None
+        if self.te_requested and not TE_ENABLED:
+            logger.warning("TransformerEngine is not available, falling back to native attention.")
+        if self.use_te_dpa:
+            self.te_dpa = self._build_te_dpa()
+
+    def _build_te_dpa(self) -> nn.Module | None:
+        if not self.use_te_dpa or not TE_ENABLED:
+            return None
+        if self.te_qkv_format != "bshd":
+            raise ValueError(f"Unsupported TE qkv_format: {self.te_qkv_format}")
+        te_dpa = te.DotProductAttention(
+            num_attention_heads=self.num_heads,
+            kv_channels=self.head_dim,
+            attention_dropout=self.attn_drop.p,
+            qkv_format=self.te_qkv_format,
+            attn_mask_type="causal" if self.is_causal else "no_mask",
+            sequence_parallel=self.te_sequence_parallel,
+            tp_size=self.te_tp_size,
+            tp_group=self.te_tp_group,
+        )
+        if self.te_cp_group is not None:
+            cp_stream = _resolve_cp_stream(self.te_cp_group, self.te_cp_stream)
+            te_dpa.set_context_parallel_group(
+                self.te_cp_group,
+                self.te_cp_global_ranks or [],
+                cp_stream,
+                self.te_cp_comm_type,
+            )
+        return te_dpa
+
+    def enable_te_dpa(self, enabled: bool = True, te_qkv_format: str | None = None) -> None:
+        self.te_requested = enabled
+        self.use_te_dpa = bool(enabled and TE_ENABLED)
+        if te_qkv_format is not None:
+            self.te_qkv_format = te_qkv_format
+        if enabled and not TE_ENABLED:
+            logger.warning("TransformerEngine is not available, falling back to native attention.")
+        self.te_dpa = self._build_te_dpa() if self.use_te_dpa else None
+
+    def set_te_parallel_groups(
+        self,
+        tp_group=None,
+        tp_size: int = 1,
+        sequence_parallel: bool | None = None,
+        cp_group=None,
+        cp_global_ranks: list[int] | None = None,
+        cp_stream=None,
+        cp_comm_type: str = "p2p",
+    ) -> None:
+        if not self.use_te_dpa:
+            return
+        rebuild = tp_size != self.te_tp_size
+        self.te_tp_group = tp_group
+        self.te_tp_size = tp_size
+        self.te_sequence_parallel = (
+            sequence_parallel if sequence_parallel is not None else (tp_group is not None and tp_size > 1)
+        )
+        self.te_cp_group = cp_group
+        self.te_cp_global_ranks = cp_global_ranks
+        self.te_cp_stream = _resolve_cp_stream(cp_group, cp_stream)
+        self.te_cp_comm_type = cp_comm_type
+        if self.te_dpa is None or rebuild:
+            self.te_dpa = self._build_te_dpa()
+        if self.te_dpa is not None:
+            te_dpa = cast(Any, self.te_dpa)
+            te_dpa.set_tensor_parallel_group(tp_group)
+            if cp_group is not None:
+                te_dpa.set_context_parallel_group(
+                    cp_group,
+                    cp_global_ranks or [],
+                    self.te_cp_stream,
+                    cp_comm_type,
+                )
+
+    def _forward_te_dpa(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        attention_mask: BlockMask | Tensor | None = None,
+    ) -> Tensor:
+        if self.te_dpa is None:
+            raise RuntimeError("TE DPA is not initialized.")
+        attention_mask, attn_mask_type = _resolve_te_attention_mask(attention_mask, self.is_causal)
+        output = self.te_dpa(
+            _to_te_bshd(q),
+            _to_te_bshd(k),
+            _to_te_bshd(v),
+            attention_mask=attention_mask,
+            qkv_format=self.te_qkv_format,
+            attn_mask_type=attn_mask_type,
+        )
+        if output.ndim == 4 and output.shape[1] == self.num_heads:
+            return output.transpose(1, 2).contiguous()
+        return output
 
     def project_v(self, x: Tensor, *, delta_t_emb: Tensor | None = None) -> Tensor:
         B, N, C = x.shape
@@ -300,13 +445,16 @@ class Attention(Attention_):
         elif rope is not None:
             raise ValueError("Invalid rope type")
 
-        if self.attn_implem != "flex_attention" and isinstance(attention_mask, BlockMask):
-            attention_mask = attention_mask.to_dense()
+        if self.use_te_dpa:
+            x = self._forward_te_dpa(q, k, v, attention_mask=attention_mask)
+        else:
+            if self.attn_implem != "flex_attention" and isinstance(attention_mask, BlockMask):
+                attention_mask = attention_mask.to_dense()
 
-        # flex attention will be compiled inside
-        attention_function_ = self._all_attention_functions.get(self.attn_implem, None)
-        assert attention_function_ is not None, f"Attention implementation {self.attn_implem} not found in available attention functions."  # fmt: skip
-        x, _ = attention_function_(self, q, k, v, attention_mask=attention_mask, dropout=self.attn_drop.p)
+            # flex attention will be compiled inside
+            attention_function_ = self._all_attention_functions.get(self.attn_implem, None)
+            assert attention_function_ is not None, f"Attention implementation {self.attn_implem} not found in available attention functions."  # fmt: skip
+            x, _ = attention_function_(self, q, k, v, attention_mask=attention_mask, dropout=self.attn_drop.p)
 
         if x.ndim == 4:
             # Most SDPA/flash attention implementations return [B, heads, N, head_dim].
@@ -353,8 +501,11 @@ class GatedAttention(nn.Module):
         attn_type: str = "sdpa",
         layer_idx: Optional[int] = None,
         v_residual: bool = False,
+        fused_rope: bool = True,
         *,
         jvp=False,
+        use_te_dpa: bool = False,
+        te_qkv_format: str = "bshd",
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -423,10 +574,175 @@ class GatedAttention(nn.Module):
             self.v_residual_lamb1 = nn.Parameter(torch.tensor(0.5))
             self.v_residual_lamb2 = nn.Parameter(torch.tensor(0.5))
 
+        self.fused_rope = fused_rope
+        self.te_requested = use_te_dpa
+        self.use_te_dpa = bool(use_te_dpa and TE_ENABLED)
+        self.te_qkv_format = te_qkv_format
+        self.te_tp_group = None
+        self.te_tp_size = 1
+        self.te_sequence_parallel = False
+        self.te_cp_group = None
+        self.te_cp_global_ranks: list[int] | None = None
+        self.te_cp_stream = None
+        self.te_cp_comm_type = "p2p"
+        self.te_dpa: Any | None = None
+        if self.te_requested and not TE_ENABLED:
+            logger.warning("TransformerEngine is not available, falling back to native attention.")
+        if self.use_te_dpa:
+            self.te_dpa = self._build_te_dpa()
+
+    def _build_te_dpa(self) -> nn.Module | None:
+        if not self.use_te_dpa or not TE_ENABLED:
+            return None
+        if self.te_qkv_format != "bshd":
+            raise ValueError(f"Unsupported TE qkv_format: {self.te_qkv_format}")
+        te_dpa = te.DotProductAttention(
+            num_attention_heads=self.num_heads,
+            kv_channels=self.head_dim,
+            attention_dropout=self.attention_dropout,
+            qkv_format=self.te_qkv_format,
+            attn_mask_type="causal" if self.is_causal else "no_mask",
+            sequence_parallel=self.te_sequence_parallel,
+            tp_size=self.te_tp_size,
+            tp_group=self.te_tp_group,
+        )
+        if self.te_cp_group is not None:
+            cp_stream = _resolve_cp_stream(self.te_cp_group, self.te_cp_stream)
+            te_dpa.set_context_parallel_group(
+                self.te_cp_group,
+                self.te_cp_global_ranks or [],
+                cp_stream,
+                self.te_cp_comm_type,
+            )
+        return te_dpa
+
+    def enable_te_dpa(self, enabled: bool = True, te_qkv_format: str | None = None) -> None:
+        self.te_requested = enabled
+        self.use_te_dpa = bool(enabled and TE_ENABLED)
+        if te_qkv_format is not None:
+            self.te_qkv_format = te_qkv_format
+        if enabled and not TE_ENABLED:
+            logger.warning("TransformerEngine is not available, falling back to native attention.")
+        self.te_dpa = self._build_te_dpa() if self.use_te_dpa else None
+
+    def set_te_parallel_groups(
+        self,
+        tp_group=None,
+        tp_size: int = 1,
+        sequence_parallel: bool | None = None,
+        cp_group=None,
+        cp_global_ranks: list[int] | None = None,
+        cp_stream=None,
+        cp_comm_type: str = "p2p",
+    ) -> None:
+        if not self.use_te_dpa:
+            return
+        rebuild = tp_size != self.te_tp_size
+        self.te_tp_group = tp_group
+        self.te_tp_size = tp_size
+        self.te_sequence_parallel = (
+            sequence_parallel if sequence_parallel is not None else (tp_group is not None and tp_size > 1)
+        )
+        self.te_cp_group = cp_group
+        self.te_cp_global_ranks = cp_global_ranks
+        self.te_cp_stream = _resolve_cp_stream(cp_group, cp_stream)
+        self.te_cp_comm_type = cp_comm_type
+        if self.te_dpa is None or rebuild:
+            self.te_dpa = self._build_te_dpa()
+        if self.te_dpa is not None:
+            te_dpa = cast(Any, self.te_dpa)
+            te_dpa.set_tensor_parallel_group(tp_group)
+            if cp_group is not None:
+                te_dpa.set_context_parallel_group(
+                    cp_group,
+                    cp_global_ranks or [],
+                    self.te_cp_stream,
+                    cp_comm_type,
+                )
+
+    def _forward_te_dpa(
+        self,
+        query_states: Tensor,
+        key_states: Tensor,
+        value_states: Tensor,
+        attention_mask: Tensor | None = None,
+    ) -> Tensor:
+        if self.te_dpa is None:
+            raise RuntimeError("TE DPA is not initialized.")
+        attention_mask, attn_mask_type = _resolve_te_attention_mask(attention_mask, self.is_causal)
+        output = self.te_dpa(
+            _to_te_bshd(query_states),
+            _to_te_bshd(key_states),
+            _to_te_bshd(value_states),
+            attention_mask=attention_mask,
+            qkv_format=self.te_qkv_format,
+            attn_mask_type=attn_mask_type,
+        )
+        if output.ndim == 4 and output.shape[1] == self.num_heads:
+            return output.transpose(1, 2).contiguous()
+        return output
+
     def project_v(self, hidden_states: torch.Tensor) -> torch.Tensor:
         bsz, q_len, _ = hidden_states.size()
         value_states = self.v_proj(hidden_states)
         return value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+
+    def _rope_cat_to_cos_sin(self, rope: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        sin_full, cos_full = rope.chunk(2, dim=-1)
+        if sin_full.shape[-1] % 2 != 0:
+            raise ValueError(f"Expected rope feature dim to be even after chunk, got {sin_full.shape[-1]}")
+
+        # GatedAttention previously used timm.apply_rot_embed_cat(..., half=False),
+        # which corresponds to pairwise even/odd rotation. Recover the original D/2 tables here.
+        cos = cos_full[..., ::2].contiguous()
+        sin = sin_full[..., ::2].contiguous()
+        return cos, sin
+
+    def _apply_rope_to_qk(
+        self,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        rope: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        npt = self.num_prefix_tokens
+        patch_len = query_states.shape[2] - npt
+        if patch_len <= 0:
+            return query_states, key_states
+
+        rope_len = rope.shape[-2]
+        if rope_len != patch_len:
+            if rope_len < patch_len:
+                raise ValueError(f"Rope sequence length {rope_len} is shorter than patch length {patch_len}")
+            logger.warning(f"Rope shape mismatch: {rope_len} != {patch_len}")
+            rope = torch.narrow(rope, -2, 0, patch_len)
+
+        if self.fused_rope:
+            cos, sin = self._rope_cat_to_cos_sin(rope)
+            query_patch = apply_rope_bhsd(
+                query_states[:, :, npt:, :],
+                cos=cos,
+                sin=sin,
+                rotary_dim=self.head_dim,
+                interleaved=True,
+            )
+            key_patch = apply_rope_bhsd(
+                key_states[:, :, npt:, :],
+                cos=cos,
+                sin=sin,
+                rotary_dim=self.head_dim,
+                interleaved=True,
+            )
+        else:
+            query_patch = apply_rot_embed_cat(query_states[:, :, npt:, :], rope, False)
+            key_patch = apply_rot_embed_cat(key_states[:, :, npt:, :], rope, False)
+
+        if npt == 0:
+            return query_patch.type_as(value_states), key_patch.type_as(value_states)
+        return (
+            torch.cat([query_states[:, :, :npt, :], query_patch], dim=2).type_as(value_states),
+            torch.cat([key_states[:, :, :npt, :], key_patch], dim=2).type_as(value_states),
+        )
 
     # Adapted from Qwen3Attention.forward
     @compile_decorator
@@ -434,13 +750,13 @@ class GatedAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
+        rope: Annotated[torch.Tensor, "Rope embedding concat"] | None = None,  # necessary, but kept here for BC
+        v_residual_v1: torch.Tensor | None = None,
         # position_ids: Optional[torch.LongTensor] = None,
         # past_key_value: Optional[Cache] = None,
         # output_attentions: bool = False,
         # use_cache: bool = False,
         # cache_position: Optional[torch.LongTensor] = None,
-        rope: Annotated[torch.Tensor, "Rope embedding concat"] | None = None,  # necessary, but kept here for BC
-        v_residual_v1: torch.Tensor | None = None,
     ):
         bsz, q_len, _ = hidden_states.size()
 
@@ -504,31 +820,7 @@ class GatedAttention(nn.Module):
 
         ####### Rope
         if rope is not None:  # (seq_max_l, head_dim)
-            npt = self.num_prefix_tokens
-            N = hidden_states.shape[-2]
-            # (bs, nhead, n, head_dim) or (n, head_dim)
-            if rope.shape[-2] + npt != N:
-                logger.warning(f"Rope shape mismatch: {rope.shape[-2]} != {N}")
-                rope_q = torch.narrow(rope, -2, 0, N)
-                rope_k = torch.narrow(rope, -2, 0, N)
-            else:
-                rope_q = rope
-                rope_k = rope
-
-            query_states = torch.cat(
-                [
-                    query_states[:, :, :npt, :],
-                    apply_rot_embed_cat(query_states[:, :, npt:, :], rope_q),
-                ],
-                dim=2,
-            ).type_as(value_states)
-            key_states = torch.cat(
-                [
-                    key_states[:, :, :npt, :],
-                    apply_rot_embed_cat(key_states[:, :, npt:, :], rope_k),
-                ],
-                dim=2,
-            ).type_as(value_states)
+            query_states, key_states = self._apply_rope_to_qk(query_states, key_states, value_states, rope)
 
         # if past_key_value is not None:
         #     cache_kwargs = {
@@ -570,26 +862,36 @@ class GatedAttention(nn.Module):
         # )
 
         # Jvp supported flash attention
-        attention_function_ = self._all_attention_functions.get(self.attn_implem, None)
-        assert attention_function_ is not None, (
-            f"Attention implementation {self.attn_implem} not found in available attention functions."
-        )
-        attn_output, _ = attention_function_(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask=attn_mask,
-            dropout=self.attention_dropout if self.training else 0.0,
-        )
+        if self.use_te_dpa:
+            attn_output = self._forward_te_dpa(query_states, key_states, value_states, attention_mask=attn_mask)
+        else:
+            attention_function_ = self._all_attention_functions.get(self.attn_implem, None)
+            assert attention_function_ is not None, (
+                f"Attention implementation {self.attn_implem} not found in available attention functions."
+            )
+            attn_output, _ = attention_function_(
+                self,
+                query_states,
+                key_states,
+                value_states,
+                attention_mask=attn_mask,
+                dropout=self.attention_dropout if self.training else 0.0,
+            )
+
+        if attn_output.ndim == 4:
+            if attn_output.shape[1] == self.num_heads:
+                attn_output = attn_output.transpose(1, 2).contiguous()
+        elif attn_output.ndim == 3:
+            attn_output = attn_output.reshape(bsz, q_len, self.num_heads, self.head_dim)
+        else:
+            raise ValueError(f"Unexpected attention output shape {tuple(attn_output.shape)}")
 
         if self.headwise_attn_output_gate or self.elementwise_attn_output_gate:
             if gate_score is None:
                 raise ValueError("gate_score must be provided when attention output gate is enabled")
             attn_output = attn_output * torch.sigmoid(gate_score)
 
-        # attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, self.num_heads * self.head_dim)
+        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim)
         attn_output = self.proj(attn_output)  # compactible with timm attentions
 
         return attn_output
@@ -1080,7 +1382,7 @@ class ContextTransformer1D(nn.Module):
                 hw = math.sqrt(x.shape[1])
                 assert hw.is_integer(), f"Cannot resample 2D PE with non-square number of tokens: {x.shape[1]}"
                 x_hw = (int(hw), int(hw))
-            x_pe = resample_abs_pos_embed(  # type: ignore
+            x_pe = resample_abs_pos_embed(
                 x_pe,  # (1, l, dim)
                 num_prefix_tokens=0,  # TODO: add register tokens support
                 new_size=x_hw,
@@ -1429,7 +1731,7 @@ class TransformerTokenizer(nn.Module):
                 self._rope_is_mixed = True
             logger.log("NOTE", f"rope kwargs: {_rope_kwargs}")
             with torch.autocast("cuda", enabled=False):
-                self.rope = create_rope_embed(_rope_type_create, **_rope_kwargs)
+                self.rope = cast(Any, create_rope_embed(_rope_type_create, **_rope_kwargs))
 
     def _build_cls_reg_tokens(self, n_reg_tokens: int, with_cls_token: bool, embed_dim: int):
         # Register tokens
@@ -1670,7 +1972,7 @@ class TransformerTokenizer(nn.Module):
             assert self.pe is not None, f"Positional encoding is None"
             pe_1lc = self.pe[None]
             if l_cur != self.n_patches:
-                pe_1lc = resample_abs_pos_embed(  # type: ignore
+                pe_1lc = resample_abs_pos_embed(
                     pe_1lc,  # (1, l, dim)
                     num_prefix_tokens=self.num_prefix_tokens,
                     new_size=(hp, wp),

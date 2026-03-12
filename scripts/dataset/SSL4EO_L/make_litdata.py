@@ -1333,7 +1333,16 @@ if __name__ == "__main__":
     # )
 
     # fast_loop_read_into_litdata()
+    # fast_loop_read_into_litdata(
+    #     "/Data3/ZiHanCao/Datasets/SSL4EO-L/oli_sr/ssl4eo_l_oli_sr",
+    #     "/Data3/ZiHanCao/Datasets/SSL4EO-L/oli_sr/oli_sr_litdata",
+    # )
+    # fast_loop_read_into_litdata(
+    #     "data2/SSL4EO-L/tm_toa/ssl4eo_l_tm_toa",
+    #     "data2/SSL4EO-L/tm_toa/ssl4eo_l_tm_toa_litdata",
+    # )
+
     fast_loop_read_into_litdata(
-        "/Data3/ZiHanCao/Datasets/SSL4EO-L/oli_sr/ssl4eo_l_oli_sr",
-        "/Data3/ZiHanCao/Datasets/SSL4EO-L/oli_sr/oli_sr_litdata",
+        "data2/SSL4EO-S/s2_l2a/s2a",
+        "data2/SSL4EO-S/s2_l2a/s2a_litdata",
     )

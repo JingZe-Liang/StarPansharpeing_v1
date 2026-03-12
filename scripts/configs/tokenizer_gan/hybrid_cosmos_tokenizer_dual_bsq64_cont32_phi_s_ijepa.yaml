@@ -33,7 +33,7 @@ proxy_task:
     optimizer:
       _target_: torch.optim.AdamW
       _partial_: true
-      lr: 3.0e-4
+      lr: 4.0e-4
       weight_decay: 1.0e-5
       eps: 1.0e-8
       betas: [0.95, 0.99]
@@ -126,6 +126,15 @@ vq_loss:
   lecam_loss_weight:
   lcr_loss_weight:
 
+  # diffusion prior regularization
+  diffusion_loss_weight: 0.0
+  diffusion_loss_options:
+    lambda0: 5.0
+    end_logsnr: -15.0
+    schedule: linear_logsnr_vp
+    time_sample_type: uniform
+    include_terminal_kl: false
+
 ema:
   _target_: ema_pytorch.EMA
   _partial_: true
@@ -134,6 +143,37 @@ ema:
   update_every: 2
   use_foreach: true
   allow_different_devices: true
+
+diffusion_reg:
+  model:
+    _target_: src.stage1.self_supervised.generative_prior_loss.model.SelfFlowDiT
+    input_size: 32
+    patch_size: 2
+    in_channels: 32
+    hidden_size: 768
+    depth: 6
+    num_heads: 12
+    mlp_ratio: 4.0
+    num_classes: 1
+    learn_sigma: false
+    has_condition: false
+    compatibility_mode: false
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 3.0e-4
+    weight_decay: 1.0e-4
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+    foreach: true
+  scheduler:
+    _target_: src.utilities.train_utils.lr_scheduler.get_cosine_schedule_reduced_with_warmup
+    _partial_: true
+    num_warmup_steps: 1000
+    num_training_steps: ${train.max_steps}
+    num_cycles: 1
+    reduced_factor: 2
+    min_lr: 1.0e-6
 
 train:
   tokenizer_name: hybrid_cosmos_dual_bsq64_cont32_distill_ijepa
@@ -148,7 +188,7 @@ train:
   max_steps: 1_000_000
   save_every: 1000
   resume_path:
-  ema_load_path:
+  ema_load_path: runs/stage1_cosmos_hybrid_dual_latent/2026-03-05_02-20-55_dual_bsq64_cont32_distill_ijepa_litdata_one_loader/ema
   compile_model: false
   only_load_tokenizer: false
   seperate_enc_dec: false
@@ -208,8 +248,8 @@ train:
 
   log:
     run_comment: dual_bsq64_cont32_distill_ijepa_${dataset.used}
-    log_with: ['tensorboard']
-    log_with_time: True
+    log_with: ["tensorboard"]
+    log_with_time: true
     visualize_every: 500
     log_every: 10
 
