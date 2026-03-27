@@ -37,7 +37,7 @@ from timm.layers import LayerScale2d, create_conv2d, create_norm_layer
 from timm.layers.weight_init import init_weight_jax
 from timm.models._manipulate import named_apply
 from typing_extensions import deprecated
-import accelerate
+# import accelerate
 
 from src.utilities.network_utils import (
     safe_init_weights,

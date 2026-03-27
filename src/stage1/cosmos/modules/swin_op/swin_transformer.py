@@ -232,7 +232,7 @@ class Mlp(nn.Module):
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         self.fc12 = nn.Linear(in_features, hidden_features * 2)
-        self.act = act_layer()
+        self.act = actx_layer()
         self.drop1 = nn.Dropout(drop)
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop2 = nn.Dropout(drop)
@@ -867,3 +867,41 @@ class SwinTransformer(nn.Module):
         flops += self.num_features * self.patches_resolution[0] * self.patches_resolution[1] // (2**self.num_layers)
         flops += self.num_features * self.num_classes
         return flops
+
+if __name__ == "__main__":
+    import sys
+    import traceback
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"SwinTransformer smoke test, device={device}")
+
+    try:
+        # 使用最小配置，避免依赖 triton/flash 等加速后端
+        model = SwinTransformer(
+            img_size=32,
+            patch_size=4,
+            in_chans=3,
+            num_classes=10,
+            embed_dim=32,
+            depths=[1, 1],
+            num_heads=[2, 2],
+            window_size=4,
+            is_flash=True,
+            attn_backend="py",
+            window_backend="py",
+            merge_backend="py",
+        )
+        model.to(device)
+        model.eval()
+
+        x = torch.randn(1, 3, 32, 32, device=device)
+        with torch.no_grad():
+            out = model(x)
+        print("Forward OK, output shape:", getattr(out, "shape", out))
+    except Exception:
+        print("Error during SwinTransformer smoke test:", file=sys.stderr)
+        traceback.print_exc()
+
+        
+
+

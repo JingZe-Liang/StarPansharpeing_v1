@@ -11,7 +11,11 @@ logger kept keywords:
     once_pattern: str, the pattern to match.
     not_rank0_print: bool, whether to print in all ranks even not rank 0.
 """
+# 1. 在文件顶部的 import 部分添加
+from typing_extensions import TypeAlias, LiteralString  # 统一从这里导入新特性
 
+# 2. 确保 Any 也被导入了
+from typing import Any, Optional, Union
 import inspect
 import os
 import re
@@ -22,8 +26,8 @@ from functools import lru_cache, partial, wraps
 from pathlib import Path
 from types import FunctionType, MethodType
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, LiteralString, Optional, TypeAlias, Union
-
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union # 去掉 LiteralString
+from typing_extensions import LiteralString # 从这里导入
 import loguru
 import torch.distributed as dist
 from beartype import beartype
@@ -37,7 +41,7 @@ from .functions import default, once
 if TYPE_CHECKING:
     from loguru import Record as LoguruRecord
 
-    Record: TypeAlias = LoguruRecord
+    Record: TypeAlias = dict[str, Any]
 else:
     Record: TypeAlias = dict[str, Any]
 

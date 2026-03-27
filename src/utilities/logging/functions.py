@@ -212,3 +212,6 @@ def get_python_pkg_env(file: str | None = None) -> str:
 if __name__ == "__main__":
     # zip_code_into_dir("tmp/", ["./src/", "./configs/"])
     print(get_python_pkg_env())
+
+
+# python -m src.stage1.cosmos.modules.swin_op.swin_transformer
