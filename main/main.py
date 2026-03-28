@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import math
 from typing import Any, Iterable, Sequence
+import warnings
 
 import torch
 import torch.nn as nn
@@ -23,15 +25,39 @@ def _ensure_tuple(data: Sequence[int] | Iterable[int]) -> tuple[int, ...]:
     return tuple(int(item) for item in data)
 
 
+def _positive_divisors(value: int) -> set[int]:
+    if value <= 0:
+        msg = "value for divisor calculation must be positive"
+        raise ValueError(msg)
+    divisors: set[int] = set()
+    limit = int(math.sqrt(value)) + 1
+    for candidate in range(1, limit):
+        if value % candidate == 0:
+            divisors.add(candidate)
+            divisors.add(value // candidate)
+    return divisors
+
+
+def _compatible_window_size(patch_hw: tuple[int, int], desired: int) -> int:
+    common_divisors = _positive_divisors(patch_hw[0]) & _positive_divisors(patch_hw[1])
+    if not common_divisors:
+        msg = f"No common divisors found for patch grid {patch_hw}"
+        raise ValueError(msg)
+    larger_or_equal = sorted(div for div in common_divisors if div >= desired)
+    if larger_or_equal:
+        return larger_or_equal[0]
+    return max(common_divisors)
+
+
 @dataclass(slots=True)
 class SwinEncoderParams:
     img_size: int | tuple[int, int] = 256
     patch_size: int | tuple[int, int] = 4
     in_chans: int = 8
     embed_dim: int = 96
-    depths: Sequence[int] = (2, 2, 6, 2)
+    depths: Sequence[int] = (2, 6)
     num_heads: Sequence[int] = (3, 6, 12, 24)
-    window_size: int = 7
+    window_size: int = 8
     is_flash: bool = True
     attn_backend: str | None = None
     window_backend: str = "py"
@@ -83,7 +109,7 @@ class BsqParams:
     zeta: float = 1.0
     input_format: str = "bchw"
     soft_entropy: bool = True
-    group_size: int = 9
+    group_size: int = 8
     persample_entropy_compute: str = "group"
     cb_entropy_compute: str = "group"
     l2_norm: bool = False
@@ -92,6 +118,13 @@ class BsqParams:
     def as_kwargs(self, embed_dim: int) -> dict[str, Any]:
         if embed_dim % self.group_size != 0:
             msg = f"embed_dim {embed_dim} must be divisible by group_size {self.group_size} for BSQ"
+            raise ValueError(msg)
+        max_supported_dim = 63
+        if embed_dim > max_supported_dim:
+            msg = (
+                "BinarySphericalQuantizer supports at most 63 channels because of its binary basis. "
+                "Please set SwinEncoder.out_dim to a smaller value."
+            )
             raise ValueError(msg)
         return {
             "embed_dim": int(embed_dim),
@@ -116,7 +149,8 @@ class SwinBsqEncoder(nn.Module):
         bsq_params: BsqParams | None = None,
     ) -> None:
         super().__init__()
-        self.encoder_params = encoder_params or SwinEncoderParams()
+        params = encoder_params or SwinEncoderParams()
+        self.encoder_params = self._adjust_encoder_params(params)
         self.encoder = SwinEncoder(**self.encoder_params.as_kwargs())
         self.bsq_params = bsq_params or BsqParams()
         self._latent_dim = self._compute_latent_dim()
@@ -128,6 +162,28 @@ class SwinBsqEncoder(nn.Module):
         if self.encoder.out_dim is not None:
             return int(self.encoder.out_dim)
         return int(self.encoder.num_features)
+
+    def _adjust_encoder_params(self, params: SwinEncoderParams) -> SwinEncoderParams:
+        img_hw = _normalize_hw(params.img_size)
+        patch_hw = _normalize_hw(params.patch_size)
+        if img_hw[0] % patch_hw[0] != 0 or img_hw[1] % patch_hw[1] != 0:
+            msg = (
+                f"img_size {img_hw} must be divisible by patch_size {patch_hw} for SwinEncoder"
+            )
+            raise ValueError(msg)
+        patch_grid = (img_hw[0] // patch_hw[0], img_hw[1] // patch_hw[1])
+        compatible_window = _compatible_window_size(patch_grid, params.window_size)
+        if compatible_window != params.window_size:
+            warnings.warn(
+                (
+                    f"window_size {params.window_size} is incompatible with the patch grid {patch_grid}; "
+                    f"using {compatible_window} instead"
+                ),
+                UserWarning,
+                stacklevel=2,
+            )
+            return replace(params, window_size=compatible_window)
+        return params
 
     @property
     def encoder_embed_dim(self) -> int:
@@ -170,17 +226,28 @@ class SwinBsqEncoder(nn.Module):
 def build_swin_bsq_encoder(
     img_size: int | tuple[int, int] = 256,
     latent_out_dim: int | None = None,
-    bsq_group_size: int = 9,
+    bsq_group_size: int = 8,
 ) -> SwinBsqEncoder:
-    encoder_cfg = SwinEncoderParams(img_size=img_size, out_dim=latent_out_dim)
+    effective_latent_dim = latent_out_dim or bsq_group_size * 2
+    if effective_latent_dim % bsq_group_size != 0:
+        effective_latent_dim = math.lcm(effective_latent_dim, bsq_group_size)
+        warnings.warn(
+            (
+                "Adjusted latent_out_dim to be divisible by bsq_group_size; "
+                f"using {effective_latent_dim} channels."
+            ),
+            UserWarning,
+            stacklevel=2,
+        )
+    encoder_cfg = SwinEncoderParams(img_size=img_size, out_dim=effective_latent_dim)
     bsq_cfg = BsqParams(group_size=bsq_group_size)
     return SwinBsqEncoder(encoder_params=encoder_cfg, bsq_params=bsq_cfg)
 
 
 def _demo() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    encoder = build_swin_bsq_encoder(img_size=256).to(device)
-    dummy = torch.randn(1, encoder.encoder_in_channels, 256, 256, device=device)
+    encoder = build_swin_bsq_encoder(img_size=256,latent_out_dim=32).to(device)
+    dummy = torch.randn(18, encoder.encoder_in_channels, 256, 256, device=device)
     latents, loss, stats = encoder(dummy)
     print(
         "Latent shape:",
