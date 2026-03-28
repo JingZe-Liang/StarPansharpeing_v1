@@ -227,17 +227,24 @@ class WindowAttention(nn.Module):
 
 
 class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, actx_layer=nn.SiLU, drop=0.0):
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int | None = None,
+        out_features: int | None = None,
+        act_layer: type[nn.Module] = nn.SiLU,
+        drop: float = 0.0,
+    ) -> None:
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         self.fc12 = nn.Linear(in_features, hidden_features * 2)
-        self.act = actx_layer()
+        self.act = act_layer()
         self.drop1 = nn.Dropout(drop)
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop2 = nn.Dropout(drop)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_gate, x_feat = self.fc12(x).chunk(2, dim=-1)
         x = self.act(x_gate) * x_feat
         x = self.drop1(x)
@@ -868,21 +875,191 @@ class SwinTransformer(nn.Module):
         flops += self.num_features * self.num_classes
         return flops
 
+
+class SwinEncoder(nn.Module):
+    r"""Encoder-only Swin Transformer for latent map extraction.
+
+    输入形状: [B, C, H, W]
+    输出形状: [B, C_latent, H_latent, W_latent]
+    """
+
+    def __init__(
+        self,
+        img_size: int | tuple[int, int] = 224,
+        patch_size: int | tuple[int, int] = 4,
+        in_chans: int = 3,
+        embed_dim: int = 96,
+        depths: list[int] | tuple[int, ...] = (2, 2, 6, 2),
+        num_heads: list[int] | tuple[int, ...] = (3, 6, 12, 24),
+        window_size: int = 7,
+        is_flash: bool = True,
+       attn_backend: str | None = None,
+        window_backend: str = "py",
+        merge_backend: str = "py",
+        mlp_cls: type[nn.Module] = Mlp,
+        mlp_kwargs: dict[str, object] | None = None,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        qk_scale: float | None = None,
+        drop_rate: float = 0.0,
+        drop_path_rate: float = 0.1,
+        norm_layer: type[nn.Module] = nn.LayerNorm,
+        ape: bool = False,
+        patch_norm: bool = True,
+        use_checkpoint: bool = False,
+        out_dim: int | None = None,
+    ) -> None:
+        super().__init__()
+
+        self.num_layers = len(depths)
+        self.embed_dim = embed_dim
+        self.ape = ape
+        self.patch_norm = patch_norm
+        self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
+        self.is_flash = is_flash
+        self.mlp_ratio = mlp_ratio
+        self.out_dim = out_dim
+
+        # split image into non-overlapping patches
+        self.patch_embed = PatchEmbed(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=in_chans,
+            embed_dim=embed_dim,
+            norm_layer=norm_layer if self.patch_norm else None,
+        )
+        num_patches = self.patch_embed.num_patches
+        patches_resolution = self.patch_embed.patches_resolution
+        self.patches_resolution = patches_resolution
+
+        # absolute position embedding
+        if self.ape:
+            self.absolute_pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
+            trunc_normal_(self.absolute_pos_embed, std=0.02)
+
+        self.pos_drop = nn.Dropout(p=drop_rate)
+
+        # stochastic depth
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+
+        # build layers
+        self.layers = nn.ModuleList()
+        for i_layer in range(self.num_layers):
+            layer = BasicLayer(
+                dim=int(embed_dim * 2**i_layer),
+                input_resolution=(patches_resolution[0] // (2**i_layer), patches_resolution[1] // (2**i_layer)),
+                depth=depths[i_layer],
+                num_heads=num_heads[i_layer],
+                window_size=window_size,
+                is_flash=is_flash,
+                attn_backend=attn_backend,
+                window_backend=window_backend,
+                merge_backend=merge_backend,
+                mlp_cls=mlp_cls,
+                mlp_kwargs=mlp_kwargs,
+                mlp_ratio=self.mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                drop=drop_rate,
+                drop_path=dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])],
+                norm_layer=norm_layer,
+                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                use_checkpoint=use_checkpoint,
+            )
+            self.layers.append(layer)
+
+        self.norm = norm_layer(self.num_features)
+        if self.out_dim is not None:
+            self.proj = nn.Conv2d(self.num_features, self.out_dim, kernel_size=1)
+        else:
+            self.proj = None
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m: nn.Module) -> None:
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    @torch.jit.ignore
+    def no_weight_decay(self) -> set[str]:
+        return {"absolute_pos_embed"}
+
+    @torch.jit.ignore
+    def no_weight_decay_keywords(self) -> set[str]:
+        return {"relative_position_bias_table"}
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.patch_embed(x)
+        if self.ape:
+            x = x + self.absolute_pos_embed
+        x = self.pos_drop(x)
+
+        for layer in self.layers:
+            x = layer(x)
+
+        x = self.norm(x)  # B L C
+        B, L, C = x.shape
+
+        if self.num_layers > 1:
+            downsample_factor = 2 ** (self.num_layers - 1)
+        else:
+            downsample_factor = 1
+        H_feat = self.patches_resolution[0] // downsample_factor
+        W_feat = self.patches_resolution[1] // downsample_factor
+        if H_feat * W_feat != L:
+            H_feat = int(math.sqrt(L))
+            W_feat = L // H_feat
+
+        x = x.view(B, H_feat, W_feat, C)
+        x = x.permute(0, 3, 1, 2).contiguous()
+
+        if self.proj is not None:
+            x = self.proj(x)
+
+        return x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_features(x)
+
+    def flops(self) -> float:
+        flops = 0.0
+        flops += self.patch_embed.flops()
+        for layer in self.layers:
+            flops += layer.flops()
+
+        if self.num_layers > 1:
+            downsample_factor = 2 ** (self.num_layers - 1)
+        else:
+            downsample_factor = 1
+        H_feat = self.patches_resolution[0] // downsample_factor
+        W_feat = self.patches_resolution[1] // downsample_factor
+        num_tokens = H_feat * W_feat
+        flops += num_tokens * self.num_features
+
+        if self.out_dim is not None:
+            flops += H_feat * W_feat * self.num_features * self.out_dim
+
+        return flops
+
 if __name__ == "__main__":
     import sys
     import traceback
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"SwinTransformer smoke test, device={device}")
+    print(f"SwinEncoder smoke test, device={device}")
 
     try:
         # 使用最小配置，避免依赖 triton/flash 等加速后端
-        model = SwinTransformer(
-            img_size=32,
+        model = SwinEncoder(
+            img_size=512,
             patch_size=4,
-            in_chans=3,
-            num_classes=10,
-            embed_dim=32,
+            in_chans=8,
+            embed_dim=128,
             depths=[1, 1],
             num_heads=[2, 2],
             window_size=4,
@@ -890,18 +1067,24 @@ if __name__ == "__main__":
             attn_backend="py",
             window_backend="py",
             merge_backend="py",
+            out_dim=128,
         )
         model.to(device)
         model.eval()
 
-        x = torch.randn(1, 3, 32, 32, device=device)
+        x = torch.randn(64, 8, 512, 512, device=device)
         with torch.no_grad():
             out = model(x)
-        print("Forward OK, output shape:", getattr(out, "shape", out))
+        print("Encoder latent OK, output shape:", getattr(out, "shape", out))
     except Exception:
-        print("Error during SwinTransformer smoke test:", file=sys.stderr)
+        print("Error during SwinEncoder smoke test:", file=sys.stderr)
         traceback.print_exc()
+        print(out.shape)
+        print(out.min(), out.max(), out.mean(), out.std())
+  
 
-        
+
+
+
 
 
