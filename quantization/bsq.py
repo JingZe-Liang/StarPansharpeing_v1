@@ -65,6 +65,11 @@ def codebook_entropy(zq, basis, K, eps=1e-4):
 
 
 class BinarySphericalQuantizer(nn.Module):
+    # NOTE: Legacy implementation.
+    # This version relies on a single int64 "basis" vector of length `embed_dim`.
+    # When `embed_dim` is larger than 63, 2 ** k overflows int64 and can contain
+    # zeros, which leads to ZeroDivisionError in `indexes_to_codes`.
+    # For latent dimensions > 63, prefer using `BinarySphericalQuantizerV2` below.
     def __init__(
         self,
         embed_dim,
@@ -260,6 +265,184 @@ class BinarySphericalQuantizer(nn.Module):
 
     def get_codebook_entry(self, indices):
         z_q = self.indexes_to_codes(indices)
+        q_scale = 1.0 / (self.embed_dim**0.5) if self.l2_norm else 1.0
+        z_q = z_q * q_scale
+        if self.input_format == "bchw":
+            h, w = int(z_q.shape[1] ** 0.5)
+            assert h * w == z_q.shape[1], "Invalid sequence length"
+            z_q = rearrange(z_q, "b (h w) c -> b c h w", h=h)
+        return z_q
+
+
+class BinarySphericalQuantizerV2(nn.Module):
+    """BSQ variant that supports large embed_dim without int64 overflow.
+
+    This implementation only uses group-wise codebooks of size 2 ** group_size
+    and does not build a global 2 ** embed_dim codebook. It is therefore
+    suitable for high-dimensional Swin latents as long as embed_dim is
+    divisible by group_size.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        beta: float,
+        gamma0: float,
+        gamma: float,
+        zeta: float,
+        input_format: str = "bchw",
+        soft_entropy: bool = True,
+        group_size: int = 9,
+        persample_entropy_compute: str = "group",
+        cb_entropy_compute: str = "group",
+        l2_norm: bool = False,
+        inv_temperature: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.beta = float(beta)
+        self.gamma0 = float(gamma0)
+        self.gamma = float(gamma)
+        self.zeta = float(zeta)
+        self.input_format = input_format
+        assert self.embed_dim % group_size == 0, (
+            f"embed_dim {self.embed_dim} must be divisible by group_size {group_size}"
+        )
+        self.num_groups = self.embed_dim // group_size
+        self.group_size = int(group_size)
+        assert persample_entropy_compute in [
+            "group",
+            "analytical",
+        ], "persample_entropy_compute must be either 'group' or 'analytical'"
+        assert cb_entropy_compute in [
+            "group",
+            "nce",
+        ], "cb_entropy_compute must be either 'group' or 'nce'"
+        self.persample_entropy_compute = persample_entropy_compute
+        self.cb_entropy_compute = cb_entropy_compute
+        self.l2_norm = bool(l2_norm)
+        self.inv_temperature = float(inv_temperature)
+
+        # Group-wise basis and codebook are small (2 ** group_size).
+        self.register_buffer(
+            "group_basis",
+            (2 ** torch.arange(self.group_size - 1, -1, -1, dtype=torch.int64)).to(torch.float32),
+        )
+
+        group_codes = torch.arange(2**self.group_size, dtype=torch.int64)
+        # Binary codewords in {0, 1}^{group_size}
+        bit_powers = 2 ** torch.arange(self.group_size - 1, -1, -1, dtype=torch.int64)
+        bits = ((group_codes.unsqueeze(-1) // bit_powers) % 2).to(torch.float32)
+        group_codebook = bits * 2 - 1
+        self.register_buffer("group_codebook", group_codebook, persistent=False)
+
+        self.soft_entropy = soft_entropy
+
+    def quantize(self, z: torch.Tensor) -> torch.Tensor:
+        assert z.shape[-1] == self.embed_dim, f"Expected {self.embed_dim} dimensions, got {z.shape[-1]}"
+        zhat = torch.where(
+            z > 0,
+            torch.tensor(1, dtype=z.dtype, device=z.device),
+            torch.tensor(-1, dtype=z.dtype, device=z.device),
+        )
+        return z + (zhat - z).detach()
+
+    def forward(
+        self, z: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, edict]:  # type: ignore[override]
+        if self.input_format == "bchw":
+            z = rearrange(z, "b c h w -> b h w c")
+        zq = self.quantize(z)
+
+        group_indices = self.codes_to_group_indexes(zq.detach())
+        used_codes = None
+
+        if self.soft_entropy:
+            persample_entropy, cb_entropy, avg_prob = self.soft_entropy_loss(z)
+            entropy_penalty = self.gamma0 * persample_entropy - self.gamma * cb_entropy
+        else:
+            zb_by_sample = ((zq + 1) / 2).reshape(z.shape[0], -1, z.shape[-1]).to(torch.float32)
+            persample_entropy = self.get_hard_per_sample_entropy(zb_by_sample)
+            # For v2 we approximate codebook entropy using group-wise probabilities.
+            _, cb_entropy, avg_prob = self.soft_entropy_loss(z)
+            entropy_penalty = self.gamma0 * persample_entropy - self.gamma * cb_entropy
+
+        q_scale = 1.0 / (self.embed_dim**0.5) if self.l2_norm else 1.0
+        zq = zq * q_scale
+
+        commit_loss = self.beta * torch.mean(((zq.detach() - z) ** 2).sum(dim=-1))
+
+        if self.input_format == "bchw":
+            zq = rearrange(zq, "b h w c -> b c h w")
+
+        H_penalty_loss = self.zeta * entropy_penalty / self.inv_temperature
+        total_loss = commit_loss + H_penalty_loss
+
+        stats = edict(
+            commit_loss=commit_loss,
+            entropy_penalty=H_penalty_loss,
+            H=cb_entropy,
+            used_codes=used_codes,
+            indices=None,
+            group_indices=group_indices,
+            avg_prob=avg_prob,
+        )
+        return zq, total_loss, stats
+
+    def soft_entropy_loss(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        group_code_book = self.group_codebook / (self.embed_dim**0.5 if self.l2_norm else 1)
+        divided_z = rearrange(z, "... (g c) -> ... g c", c=self.group_size)
+
+        distance = -2 * torch.einsum("... g c, d c ->... g d", divided_z, group_code_book)
+        prob = (-distance * self.inv_temperature).softmax(dim=-1)
+        if self.persample_entropy_compute == "analytical":
+            if self.l2_norm:
+                p = torch.sigmoid(-4 * z / (self.embed_dim**0.5) * self.inv_temperature)
+            else:
+                p = torch.sigmoid(-4 * z * self.inv_temperature)
+            prob = torch.stack([p, 1 - p], dim=-1)
+            per_sample_entropy = self.get_entropy(prob, dim=-1, normalize=False).sum(dim=-1).mean()
+        else:
+            per_sample_entropy = self.get_entropy(prob, dim=-1, normalize=False).sum(dim=-1).mean()
+
+        avg_prob = reduce(prob, "... g d -> g d", "mean")
+        codebook_entropy = self.get_entropy(avg_prob, dim=-1, normalize=False)
+        return per_sample_entropy, codebook_entropy.sum(), avg_prob
+
+    def get_hard_per_sample_entropy(self, zb_by_sample: torch.Tensor) -> torch.Tensor:
+        probs_per_dim = zb_by_sample.sum(1) / zb_by_sample.shape[1]
+        persample_entropy = -probs_per_dim * torch.log(probs_per_dim + 1e-8) - (1 - probs_per_dim) * torch.log(
+            1 - probs_per_dim + 1e-8
+        )
+        persample_entropy = persample_entropy.sum(-1)
+        return persample_entropy.mean()
+
+    def codes_to_group_indexes(self, zhat: torch.Tensor) -> torch.Tensor:
+        zhat_in_group = rearrange(zhat, "b ... (g c) -> b ... g c", c=self.group_size)
+        return ((zhat_in_group + 1) / 2 * self.group_basis).sum(axis=-1).to(torch.int64)
+
+    def group_indexes_to_codes(self, group_indices: torch.Tensor) -> torch.Tensor:
+        group_indices = group_indices.unsqueeze(-1)
+        codes_non_centered = torch.remainder(torch.floor_divide(group_indices, self.group_basis), 2)
+        codes_non_centered = rearrange(codes_non_centered, "b ... g c -> b ... (g c)")
+        return codes_non_centered * 2 - 1
+
+    def get_entropy(
+        self,
+        count: torch.Tensor,
+        dim: int = -1,
+        eps: float = 1e-4,
+        normalize: bool = True,
+    ) -> torch.Tensor:
+        if normalize:
+            probs = (count + eps) / (count + eps).sum(dim=dim, keepdim=True)
+        else:
+            probs = count
+        H = -(probs * torch.log(probs + 1e-8)).sum(dim=dim)
+        return H
+
+    def get_group_codebook_entry(self, group_indices: torch.Tensor) -> torch.Tensor:
+        z_q = self.group_indexes_to_codes(group_indices)
         q_scale = 1.0 / (self.embed_dim**0.5) if self.l2_norm else 1.0
         z_q = z_q * q_scale
         if self.input_format == "bchw":
